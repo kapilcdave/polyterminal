@@ -1,6 +1,8 @@
-# ⚡ PolyTerminal (Bloomberg Edition)
+# PolyTerminal
 
-A professional-grade, real-time terminal dashboard for monitoring **Kalshi** and **Polymarket** prediction markets. Built for professional traders with a focus on cross-platform arbitrage.
+A real-time terminal dashboard for monitoring matched **Kalshi** and **Polymarket** NBA/WNBA full-game basketball total-points over/under markets.
+
+The matcher is intentionally narrow. It ignores other sports, college basketball, player props, team totals, spreads, and partial-game totals before WebSocket subscriptions are built.
 
 ## 🛡️ Security
 PolyTerminal is designed with security as a priority:
@@ -8,12 +10,10 @@ PolyTerminal is designed with security as a priority:
 - **Environment Isolation**: All sensitive credentials (API Keys, Secrets, Private Keys) are stored in `.env` and excluded from Git via `.gitignore`.
 - **Zero-Storage**: The terminal does not store your keys in any database; they are loaded into memory only during runtime.
 
-- **Multi-Platform Monitoring** — Side-by-side real-time view of Kalshi (USD) and Polymarket (USDC).
-- **Bloomberg-Style UI** — High-contrast, professional-grade TUI with distinct data panes and live clock.
-- **Cross-Platform Matching** — Inline "🔗" indicator for equivalent markets across platforms using fuzzy logic.
-- **Niche Filtering** — Instant category-based filtering (Financial, Politics, Sports, Science, etc.) with dedicated hotkeys.
-- **Theme Switcher** — Cycle through professional color schemes (Nord, Gruvbox, Dracual, etc.) on the fly.
-- **Live WebSocket Data** — Toggleable real-time price updates via direct WebSocket connections.
+- **NBA/WNBA Total Matching** — Parses sport, teams, total strike, start time, and over/under token orientation.
+- **Best-Pair Selection** — Scores all candidate pairs and keeps the best non-duplicated Kalshi/Polymarket matches.
+- **Scoped WebSocket Data** — Subscribes only to matched Kalshi tickers and Polymarket over-token IDs.
+- **Terminal UI** — Shows matched market prices, volume, and cross-venue deltas.
 
 ## Quick Start
 
@@ -36,26 +36,43 @@ Edit `.env` with your Kalshi credentials. Polymarket public data works out of th
 
 ### 4. Run the Terminal
 ```bash
-python terminal_app.py
+python unified_terminal.py
 ```
+
+## Matching Rules
+
+`market_matcher.py` keeps only markets that satisfy all of these:
+
+- sport is `NBA` or `WNBA`
+- market is a full-game total-points over/under
+- total strike is plausible for basketball
+- both teams can be inferred
+- Kalshi and Polymarket strikes are within the configured tolerance
+- start times are close when both venues expose start timestamps
+
+Polymarket YES/NO markets are normalized so `poly_token_id` always represents the over side. If a question is phrased as an under market, the matcher flips the YES/NO token mapping.
 
 ## Controls
 
 | Key | Action |
 |-----|--------|
-| `F1` - `F5` | Filter by Niche (Financial, Politics, Sports, Ents, Science) |
-| `F6` | Show All Markets |
 | `R` | Manual Refresh |
 | `L` | Toggle Live WebSocket Updates |
-| `T` | Cycle UI Themes |
 | `Q` | Quit Terminal |
 
 ## Project Structure
 
-- `terminal_app.py`: Main Bloomberg-style TUI and layout logic.
+- `unified_terminal.py`: Main TUI and layout logic.
+- `market_matcher.py`: NBA/WNBA total-points market parser, scorer, and matcher.
 - `kalshi_client.py`: Interface for Kalshi REST & WebSocket APIs.
 - `polymarket_client.py`: Interface for Polymarket Gamma & CLOB.
 - `unified_store.py`: Shared state and data management.
+
+## Tests
+
+```bash
+python -m unittest
+```
 
 ## License
 

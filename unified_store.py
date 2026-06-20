@@ -52,46 +52,18 @@ class UnifiedStore:
                     self._add_price_point(market.id, kalshi_price=price, kalshi_volume=volume)
                     await self._notify_subscribers(market, 'kalshi_update')
                     return
-                    
-            new_market = UnifiedMarket(
-                id=f"kalshi_{ticker.lower()}",
-                event_name=ticker,
-                normalized_name=self.matcher.normalize_title(ticker),
-                kalshi_ticker=ticker,
-                kalshi_price=price,
-                kalshi_volume=volume
-            )
-            self.markets[new_market.id] = new_market
-            self._add_price_point(new_market.id, kalshi_price=price, kalshi_volume=volume)
-            await self._notify_subscribers(new_market, 'new_market')
             
     async def update_from_poly(self, token_id: str, question: str, price: float, volume: int):
         async with self._lock:
-            norm_name = self.matcher.normalize_title(question)
-            market_id = self.matcher.create_market_id(norm_name)
-            
-            if market_id in self.markets:
-                market = self.markets[market_id]
-                market.poly_token_id = token_id
-                market.poly_question = question
-                market.poly_price = price
-                market.poly_volume = volume
-                market.last_update = time.time()
-                self._add_price_point(market_id, poly_price=price, poly_volume=volume)
-                await self._notify_subscribers(market, 'poly_update')
-            else:
-                new_market = UnifiedMarket(
-                    id=market_id,
-                    event_name=question,
-                    normalized_name=norm_name,
-                    poly_token_id=token_id,
-                    poly_question=question,
-                    poly_price=price,
-                    poly_volume=volume
-                )
-                self.markets[new_market.id] = new_market
-                self._add_price_point(new_market.id, poly_price=price, poly_volume=volume)
-                await self._notify_subscribers(new_market, 'new_market')
+            for market in self.markets.values():
+                if market.poly_token_id == token_id:
+                    market.poly_question = question
+                    market.poly_price = price
+                    market.poly_volume = volume
+                    market.last_update = time.time()
+                    self._add_price_point(market.id, poly_price=price, poly_volume=volume)
+                    await self._notify_subscribers(market, 'poly_update')
+                    return
                 
     def _add_price_point(
         self, 
@@ -186,6 +158,7 @@ class UnifiedStore:
     ):
         async with self._lock:
             unified = self.matcher.match_markets(kalshi_markets, poly_markets)
+            seen = set(unified)
             
             for market_id, new_market in unified.items():
                 if market_id in self.markets:
@@ -197,9 +170,22 @@ class UnifiedStore:
                     existing.poly_volume = new_market.poly_volume
                     existing.poly_token_id = new_market.poly_token_id
                     existing.poly_question = new_market.poly_question
+                    existing.sport = new_market.sport
+                    existing.strike = new_market.strike
+                    existing.kalshi_yes_means_over = new_market.kalshi_yes_means_over
+                    existing.poly_under_token_id = new_market.poly_under_token_id
+                    existing.poly_market_id = new_market.poly_market_id
+                    existing.match_score = new_market.match_score
+                    existing.team_overlap = new_market.team_overlap
+                    existing.strike_diff = new_market.strike_diff
+                    existing.title_similarity = new_market.title_similarity
+                    existing.start_time_diff_seconds = new_market.start_time_diff_seconds
                     existing.last_update = time.time()
                 else:
                     self.markets[market_id] = new_market
+
+            for stale_id in [market_id for market_id in self.markets if market_id not in seen]:
+                self.markets.pop(stale_id, None)
                     
             for callback in self._subscribers:
                 try:

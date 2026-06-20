@@ -37,8 +37,8 @@ class BloombergTicker(Static):
     def update_ticker(self):
         now = datetime.now().strftime("%H:%M:%S")
         self.update(
-            f" [bold cyan]LIVE STREAM[/] | KALSHI: [green]DEMO[/] | POLY: [green]ACTIVE[/] | "
-            f"DXY: 104.20 (-0.05%) | BTC: 67,890 (+2.34%) | {now} "
+            f" [bold cyan]NBA/WNBA TOTALS[/] | KALSHI: [green]ORDERBOOK[/] | "
+            f"POLYMARKET: [green]CLOB[/] | MATCHED OVER/UNDER MARKETS | {now} "
         )
 
 class ClawdbotStatus(Static):
@@ -55,7 +55,7 @@ class UnifiedTerminal(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh Markets"),
         Binding("c", "clear_logs", "Clear Logs"),
-        Binding("t", "toggle_logs", "Toggle WebSockets"),
+        Binding("l", "toggle_logs", "Toggle WebSockets"),
         Binding("ctrl+l", "focus_input", "Clawdbot CMD"),
     ]
 

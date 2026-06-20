@@ -17,12 +17,17 @@ except ImportError:
 logger = logging.getLogger("KalshiClient")
 
 class MockMarket:
-    def __init__(self, ticker, title, price):
+    def __init__(self, ticker, title, price, *, subtitle="", yes_sub_title="", no_sub_title="", volume=None):
         self.ticker = ticker
         self.title = title
+        self.subtitle = subtitle
+        self.yes_sub_title = yes_sub_title
+        self.no_sub_title = no_sub_title
         self.yes_bid = price - 0.02
         self.yes_ask = price + 0.02
-        self.volume = random.randint(1000, 50000)
+        self.no_bid = (1.0 - price) - 0.02
+        self.no_ask = (1.0 - price) + 0.02
+        self.volume = volume if volume is not None else random.randint(1000, 50000)
         self.open_interest = random.randint(5000, 100000)
         self.last_price = price
 
@@ -118,20 +123,23 @@ class KalshiClient:
         
     async def get_active_markets(self, limit=20, cursor=None, series_ticker=None, event_ticker=None, category=None):
         if self.use_mock:
-            # Generate fake markets based on category
-            markets = []
-            default_categories = ["Politics", "Economics", "Weather", "Tech", "Sports"]
-            target_cat = category if category else random.choice(default_categories)
-            
-            for i in range(limit):
-                price = random.uniform(0.10, 0.90)
-                m = MockMarket(
-                    ticker=f"{target_cat.upper()}-{i}",
-                    title=f"Will {target_cat} Event {i} happen?",
-                    price=price
+            samples = [
+                ("KXNBA-LALGSW-2215", "NBA Lakers vs Warriors total points over/under 221.5", 0.48, "Over/under 221.5", "Over 221.5", "Under 221.5"),
+                ("KXNBA-BOSNYK-2265", "NBA Celtics vs Knicks total points over/under 226.5", 0.52, "Over/under 226.5", "Over 226.5", "Under 226.5"),
+                ("KXWNBA-CHIIND-1655", "WNBA Sky vs Fever total points over/under 165.5", 0.51, "Over/under 165.5", "Over 165.5", "Under 165.5"),
+            ]
+            return [
+                MockMarket(
+                    ticker=ticker,
+                    title=title,
+                    price=price,
+                    subtitle=subtitle,
+                    yes_sub_title=yes_sub_title,
+                    no_sub_title=no_sub_title,
+                    volume=random.randint(1000, 50000),
                 )
-                markets.append(m)
-            return markets
+                for ticker, title, price, subtitle, yes_sub_title, no_sub_title in samples[:limit]
+            ]
 
         try:
             # Map niche to series_ticker or event_ticker prefix if needed
