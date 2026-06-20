@@ -124,9 +124,10 @@ class KalshiClient:
     async def get_active_markets(self, limit=20, cursor=None, series_ticker=None, event_ticker=None, category=None):
         if self.use_mock:
             samples = [
+                ("KXPRES-2028DEM", "Will a Democrat win the 2028 US presidential election?", 0.48, "2028 election winner", "Yes", "No"),
+                ("KXBTC-2026-150K", "Will Bitcoin be above $150,000 on December 31, 2026?", 0.31, "Bitcoin above 150000", "Yes", "No"),
+                ("KXCPI-2026-3P0", "Will US CPI inflation be above 3.0% in 2026?", 0.52, "CPI above 3.0%", "Yes", "No"),
                 ("KXNBA-LALGSW-2215", "NBA Lakers vs Warriors total points over/under 221.5", 0.48, "Over/under 221.5", "Over 221.5", "Under 221.5"),
-                ("KXNBA-BOSNYK-2265", "NBA Celtics vs Knicks total points over/under 226.5", 0.52, "Over/under 226.5", "Over 226.5", "Under 226.5"),
-                ("KXWNBA-CHIIND-1655", "WNBA Sky vs Fever total points over/under 165.5", 0.51, "Over/under 165.5", "Over 165.5", "Under 165.5"),
             ]
             return [
                 MockMarket(

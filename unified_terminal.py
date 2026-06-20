@@ -37,8 +37,8 @@ class BloombergTicker(Static):
     def update_ticker(self):
         now = datetime.now().strftime("%H:%M:%S")
         self.update(
-            f" [bold cyan]NBA/WNBA TOTALS[/] | KALSHI: [green]ORDERBOOK[/] | "
-            f"POLYMARKET: [green]CLOB[/] | MATCHED OVER/UNDER MARKETS | {now} "
+            f" [bold cyan]POLYTERMINAL[/] | KALSHI: [green]ORDERBOOK[/] | "
+            f"POLYMARKET: [green]CLOB[/] | MATCHED CROSS-MARKET FEED | {now} "
         )
 
 class ClawdbotStatus(Static):

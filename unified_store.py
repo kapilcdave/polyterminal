@@ -170,6 +170,13 @@ class UnifiedStore:
                     existing.poly_volume = new_market.poly_volume
                     existing.poly_token_id = new_market.poly_token_id
                     existing.poly_question = new_market.poly_question
+                    existing.category = new_market.category
+                    existing.target_outcome = new_market.target_outcome
+                    existing.kalshi_yes_means_target = new_market.kalshi_yes_means_target
+                    existing.poly_inverse_token_id = new_market.poly_inverse_token_id
+                    existing.keyword_overlap = new_market.keyword_overlap
+                    existing.number_diff = new_market.number_diff
+                    existing.category_similarity = new_market.category_similarity
                     existing.sport = new_market.sport
                     existing.strike = new_market.strike
                     existing.kalshi_yes_means_over = new_market.kalshi_yes_means_over

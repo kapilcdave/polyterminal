@@ -1,8 +1,8 @@
 # PolyTerminal
 
-A real-time terminal dashboard for monitoring matched **Kalshi** and **Polymarket** NBA/WNBA full-game basketball total-points over/under markets.
+A real-time terminal dashboard for monitoring matched **Kalshi** and **Polymarket** prediction markets.
 
-The matcher is intentionally narrow. It ignores other sports, college basketball, player props, team totals, spreads, and partial-game totals before WebSocket subscriptions are built.
+The matcher is general purpose: it parses active markets from both venues, scores likely equivalents, and only streams the matched Kalshi tickers and Polymarket token IDs.
 
 ## 🛡️ Security
 PolyTerminal is designed with security as a priority:
@@ -10,9 +10,9 @@ PolyTerminal is designed with security as a priority:
 - **Environment Isolation**: All sensitive credentials (API Keys, Secrets, Private Keys) are stored in `.env` and excluded from Git via `.gitignore`.
 - **Zero-Storage**: The terminal does not store your keys in any database; they are loaded into memory only during runtime.
 
-- **NBA/WNBA Total Matching** — Parses sport, teams, total strike, start time, and over/under token orientation.
+- **General Market Matching** — Parses category hints, canonical text, keywords, numbers, timestamps, and binary outcome orientation.
 - **Best-Pair Selection** — Scores all candidate pairs and keeps the best non-duplicated Kalshi/Polymarket matches.
-- **Scoped WebSocket Data** — Subscribes only to matched Kalshi tickers and Polymarket over-token IDs.
+- **Scoped WebSocket Data** — Subscribes only to matched Kalshi tickers and Polymarket token IDs.
 - **Terminal UI** — Shows matched market prices, volume, and cross-venue deltas.
 
 ## Quick Start
@@ -41,16 +41,16 @@ python unified_terminal.py
 
 ## Matching Rules
 
-`market_matcher.py` keeps only markets that satisfy all of these:
+`market_matcher.py` parses each venue into a common shape and scores every plausible pair using:
 
-- sport is `NBA` or `WNBA`
-- market is a full-game total-points over/under
-- total strike is plausible for basketball
-- both teams can be inferred
-- Kalshi and Polymarket strikes are within the configured tolerance
-- start times are close when both venues expose start timestamps
+- normalized market text
+- shared keywords/entities
+- numeric values such as thresholds, years, and percentages
+- category hints from tickers, tags, and market text
+- start/end timestamps when both venues expose them
+- compatible binary outcome orientation
 
-Polymarket YES/NO markets are normalized so `poly_token_id` always represents the over side. If a question is phrased as an under market, the matcher flips the YES/NO token mapping.
+For threshold markets, Polymarket YES/NO markets are normalized so `poly_token_id` represents the same side as the matched Kalshi contract. For normal binary markets, `poly_token_id` represents the YES side of the matching proposition.
 
 ## Controls
 
@@ -63,7 +63,7 @@ Polymarket YES/NO markets are normalized so `poly_token_id` always represents th
 ## Project Structure
 
 - `unified_terminal.py`: Main TUI and layout logic.
-- `market_matcher.py`: NBA/WNBA total-points market parser, scorer, and matcher.
+- `market_matcher.py`: General market parser, scorer, and matcher.
 - `kalshi_client.py`: Interface for Kalshi REST & WebSocket APIs.
 - `polymarket_client.py`: Interface for Polymarket Gamma & CLOB.
 - `unified_store.py`: Shared state and data management.

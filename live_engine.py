@@ -134,7 +134,7 @@ class LiveEngine:
     async def _kalshi_stream(self):
         url = self.KALSHI_WSS_PROD if self.kalshi_env == "prod" else self.KALSHI_WSS_DEMO
         if not self._kalshi_tickers:
-            logger.warning("Kalshi stream skipped: no matched NBA/WNBA total tickers")
+            logger.warning("Kalshi stream skipped: no matched Kalshi tickers")
             return
         
         headers = self._kalshi_auth_headers()
@@ -209,7 +209,7 @@ class LiveEngine:
                 price = payload.get("price", 0) / 100 if isinstance(payload.get("price"), (int, float)) else 0
                 volume = payload.get("size", 0) or payload.get("volume", 0)
             else:
-                price = self._kalshi_over_price(ticker, payload)
+                price = self._kalshi_target_price(ticker, payload)
                     
             await self.store.update_from_kalshi(ticker, price, volume)
             
@@ -218,7 +218,7 @@ class LiveEngine:
             
     async def _poly_stream(self):
         if not self._poly_token_ids:
-            logger.warning("Polymarket stream skipped: no matched NBA/WNBA total tokens")
+            logger.warning("Polymarket stream skipped: no matched Polymarket token IDs")
             return
         while self._running:
             try:
@@ -228,10 +228,10 @@ class LiveEngine:
                     await self._notify_status(self.poly_status)
                     sub_msg = {
                         "type": "market",
-                        "assets_ids": self._poly_token_ids[:100],
+                        "assets_ids": self._poly_token_ids,
                         "custom_feature_enabled": True,
                     }
-                    logger.debug(f"Subscribing to Poly with {len(self._poly_token_ids[:100])} tokens.")
+                    logger.debug(f"Subscribing to Poly with {len(self._poly_token_ids)} tokens.")
                     await ws.send(json.dumps(sub_msg))
                     ping_task = asyncio.create_task(self._poly_ping(ws))
 
@@ -327,7 +327,7 @@ class LiveEngine:
         poly = PolymarketClient()
         try:
             kalshi_markets, poly_markets = await asyncio.gather(
-                kalshi.get_active_markets(limit=500, category="Sports"),
+                kalshi.get_active_markets(limit=500),
                 poly.get_active_markets(limit=500),
             )
             await self.store.rebuild_from_feeds(kalshi_markets, poly_markets)
@@ -347,7 +347,7 @@ class LiveEngine:
                 if market.poly_token_id
             }
             logger.info(
-                "Matched NBA/WNBA total markets: kalshi=%d polymarket=%d matched=%d",
+                "Matched cross-venue markets: kalshi=%d polymarket=%d matched=%d",
                 len(kalshi_markets),
                 len(poly_markets),
                 len(self._kalshi_tickers),
@@ -371,15 +371,18 @@ class LiveEngine:
         prices = [price for price in prices if price > 0]
         return max(prices) if prices else 0.0
 
-    def _kalshi_over_price(self, ticker: str, payload: Dict[str, Any]) -> float:
+    def _kalshi_target_price(self, ticker: str, payload: Dict[str, Any]) -> float:
         market = next(
             (market for market in self.store.get_all_markets() if market.kalshi_ticker == ticker),
             None,
         )
-        use_yes_side = market.kalshi_yes_means_over if market else True
+        use_yes_side = getattr(market, "kalshi_yes_means_target", getattr(market, "kalshi_yes_means_over", True)) if market else True
         side_keys = ("yes_dollars_fp", "yes") if use_yes_side else ("no_dollars_fp", "no")
         orders = payload.get(side_keys[0]) or payload.get(side_keys[1]) or []
         return self._level_price(orders[0]) if orders else 0.0
+
+    def _kalshi_over_price(self, ticker: str, payload: Dict[str, Any]) -> float:
+        return self._kalshi_target_price(ticker, payload)
 
     def _safe_float(self, value: Any) -> float:
         try:
