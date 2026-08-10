@@ -17,6 +17,7 @@ build/
 *.key
 firstliveterminalkey.txt
 kalshi_key.pem
+polyterminal.txt
 
 # IDE
 .vscode/

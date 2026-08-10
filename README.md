@@ -33,26 +33,32 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 Edit `.env` with your Kalshi credentials. Polymarket public data works out of the box.
+Full WebSocket mode expects both Kalshi API credentials and Polymarket L2 API credentials.
 
 ### 4. Run the Terminal
 ```bash
 python terminal_app.py
 ```
 
+Or install the local console command:
+```bash
+pip install -e .
+polyterminal
+```
+
 ## Controls
 
 | Key | Action |
 |-----|--------|
-| `F1` - `F5` | Filter by Niche (Financial, Politics, Sports, Ents, Science) |
-| `F6` | Show All Markets |
 | `R` | Manual Refresh |
-| `L` | Toggle Live WebSocket Updates |
-| `T` | Cycle UI Themes |
+| `T` | Toggle WebSocket Feed Pane |
+| `C` | Clear WebSocket Logs |
 | `Q` | Quit Terminal |
 
 ## Project Structure
 
-- `terminal_app.py`: Main Bloomberg-style TUI and layout logic.
+- `unified_terminal.py`: Main Bloomberg-style TUI and layout logic.
+- `terminal_app.py`: Backward-compatible launcher.
 - `kalshi_client.py`: Interface for Kalshi REST & WebSocket APIs.
 - `polymarket_client.py`: Interface for Polymarket Gamma & CLOB.
 - `unified_store.py`: Shared state and data management.

@@ -3,7 +3,6 @@
 Screen {
     background: #000000;
     color: #ffffff;
-    font-family: "Courier New", Courier, monospace;
 }
 
 #ticker {
@@ -30,13 +29,7 @@ Screen {
 }
 
 #websocket-pane {
-    height: 30%;
-    border-bottom: solid #333333;
-    padding: 0 1;
-}
-
-#agent-pane {
-    height: 70%;
+    height: 1fr;
     padding: 0 1;
 }
 
@@ -67,19 +60,6 @@ DataTable > .datatable--cursor {
 #ws-log {
     background: #050505;
     color: #aaaaaa;
-}
-
-#agent-output {
-    background: #050505;
-    color: #eeeeee;
-    height: 1fr;
-}
-
-#agent-input {
-    background: #111111;
-    color: #00ff00;
-    border: none;
-    margin: 0;
 }
 
 #status-bar {

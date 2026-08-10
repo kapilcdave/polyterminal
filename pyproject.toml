@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polyterminal"
+version = "0.1.0"
+description = "A Textual TUI for monitoring Kalshi and Polymarket prediction markets."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "kalshi-python-async>=3.2.0,<4",
+    "textual>=7.0.0",
+    "python-dotenv>=1.0.0",
+    "numpy>=2.0.0",
+    "httpx>=0.28.0",
+    "websockets>=11.0.0",
+    "cryptography>=42.0.0",
+]
+
+[project.scripts]
+polyterminal = "unified_terminal:main"
+
+[tool.setuptools]
+py-modules = [
+    "kalshi_client",
+    "live_engine",
+    "market_matcher",
+    "polymarket_client",
+    "terminal_app",
+    "unified_store",
+    "unified_terminal",
+]
+
+[tool.setuptools.data-files]
+"." = ["unified_terminal.tcss"]

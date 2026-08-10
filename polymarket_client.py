@@ -2,6 +2,7 @@ import httpx
 import asyncio
 import logging
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,7 +16,7 @@ class PolymarketClient:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=10.0)
 
-    async def get_active_markets(self, limit: int = 20, tag: str | None = None):
+    async def get_active_markets(self, limit: int = 20, tag: Optional[str] = None):
         """
         Fetch active markets from Gamma API.
         """
