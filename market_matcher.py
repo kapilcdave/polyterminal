@@ -86,24 +86,28 @@ class UnifiedMarket:
     event_name: str
     normalized_name: str
     kalshi_ticker: Optional[str] = None
-    kalshi_price: float = 0.0
+    kalshi_price: Optional[float] = None
     kalshi_volume: int = 0
     poly_token_id: Optional[str] = None
     poly_question: Optional[str] = None
-    poly_price: float = 0.0
+    poly_price: Optional[float] = None
     poly_volume: int = 0
     price_history: List[Dict[str, Any]] = field(default_factory=list)
     last_update: float = 0.0
 
     @property
     def delta_percent(self) -> float:
-        if self.kalshi_price > 0 and self.poly_price > 0:
+        if self.kalshi_price is not None and self.kalshi_price > 0 and self.poly_price is not None:
             return ((self.poly_price - self.kalshi_price) / self.kalshi_price) * 100
         return 0.0
 
     @property
     def has_both_prices(self) -> bool:
-        return self.kalshi_price > 0 and self.poly_price > 0
+        return self.kalshi_price is not None and self.poly_price is not None
+
+    @property
+    def has_comparable_prices(self) -> bool:
+        return self.has_both_prices and self.kalshi_price > 0
 
     @property
     def total_volume(self) -> int:
@@ -126,7 +130,7 @@ class SourceMarket:
     title: str
     features: MarketFeatures
     ticker: Optional[str] = None
-    price: float = 0.0
+    price: Optional[float] = None
     volume: int = 0
     token_id: Optional[str] = None
     raw: Any = None
@@ -202,13 +206,13 @@ class MarketMatcher:
                 market = self._merge_sources(kalshi[best_idx], poly_market)
             else:
                 market = self._unified_from_poly(poly_market)
-            unified[self._unique_id(unified, market.id)] = market
+            self._add_unique(unified, market)
 
         for idx, kalshi_market in enumerate(kalshi):
             if idx in used_kalshi:
                 continue
             market = self._unified_from_kalshi(kalshi_market)
-            unified[self._unique_id(unified, market.id)] = market
+            self._add_unique(unified, market)
 
         return unified
 
@@ -308,12 +312,15 @@ class MarketMatcher:
 
     def _source_from_kalshi(self, market: Any) -> SourceMarket:
         title = getattr(market, "title", "") or getattr(market, "event_title", "") or getattr(market, "ticker", "")
+        raw_price = getattr(market, "yes_bid", None)
+        if raw_price is None:
+            raw_price = getattr(market, "last_price", None)
         return SourceMarket(
             source="kalshi",
             title=title,
             features=self.features_for_title(title),
             ticker=getattr(market, "ticker", ""),
-            price=self._float_or_zero(getattr(market, "yes_bid", 0) or getattr(market, "last_price", 0)),
+            price=self._float_or_none(raw_price),
             volume=self._int_or_zero(getattr(market, "volume", 0)),
             raw=market,
         )
@@ -383,6 +390,10 @@ class MarketMatcher:
         while f"{base_id}_{i}" in existing:
             i += 1
         return f"{base_id}_{i}"
+
+    def _add_unique(self, existing: Dict[str, UnifiedMarket], market: UnifiedMarket) -> None:
+        market.id = self._unique_id(existing, market.id)
+        existing[market.id] = market
 
     def _extract_entities(self, title: str, tokens: Set[str]) -> Set[str]:
         entities: Set[str] = set()
@@ -459,11 +470,11 @@ class MarketMatcher:
 
         return None
 
-    def _poly_yes_price(self, market: Dict[str, Any]) -> float:
+    def _poly_yes_price(self, market: Dict[str, Any]) -> Optional[float]:
         outcome_prices = self._json_list(market.get("outcomePrices"))
         if outcome_prices:
-            return self._float_or_zero(outcome_prices[0])
-        return 0.0
+            return self._float_or_none(outcome_prices[0])
+        return None
 
     @staticmethod
     def _json_list(value: Any) -> List[Any]:
@@ -480,6 +491,14 @@ class MarketMatcher:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _float_or_none(value: Any) -> Optional[float]:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if 0 <= value <= 1 else None
 
     @staticmethod
     def _int_or_zero(value: Any) -> int:

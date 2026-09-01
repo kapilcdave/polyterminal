@@ -1,8 +1,8 @@
-import httpx
 import asyncio
 import logging
-import os
 from typing import Optional
+
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,7 +36,7 @@ class PolymarketClient:
             return markets
         except Exception as e:
             logger.error(f"Error fetching Polymarket markets: {e}")
-            return []
+            raise
 
     async def get_market_book(self, token_id: str):
         """
@@ -44,91 +44,40 @@ class PolymarketClient:
         """
         url = f"{self.CLOB_URL}/book"
         params = {"token_id": token_id}
-        try:
-            response = await self.client.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Error fetching order book for {token_id}: {e}")
-            return None
+        response = await self.client.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
 
     async def get_price(self, token_id: str):
         """
         Fetch mid price for a specific token from CLOB API.
         """
-        url = f"{self.CLOB_URL}/price"
+        url = f"{self.CLOB_URL}/midpoint"
         params = {"token_id": token_id}
-        try:
-            response = await self.client.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Error fetching price for {token_id}: {e}")
-            return None
+        response = await self.client.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
 
     async def get_prices_history(self, token_id: str, interval: str = "1h", limit: int = 100):
         """
         Fetch historical price data from CLOB API.
-        Intervals: 1m, 10m, 30m, 1h, 1d
+        Intervals: 1m, 1h, 6h, 1d, 1w, max
         """
+        if interval not in {"1m", "1h", "6h", "1d", "1w", "max"}:
+            raise ValueError("unsupported Polymarket history interval")
+        if limit < 1:
+            raise ValueError("limit must be positive")
         url = f"{self.CLOB_URL}/prices-history"
         params = {
             "market": token_id,
             "interval": interval
         }
-        try:
-            response = await self.client.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Error fetching price history for {token_id}: {e}")
-            return []
-
-    async def get_balance(self):
-        """
-        Fetch account balance using API credentials.
-        Note: Requires POLYMARKET_API_KEY, SECRET, and PASSPHRASE.
-        """
-        api_key = os.getenv("POLYMARKET_API_KEY")
-        secret = os.getenv("POLYMARKET_API_SECRET")
-        passphrase = os.getenv("POLYMARKET_API_PASSPHRASE")
-
-        if not (api_key and secret and passphrase):
-            logger.warning("Polymarket API credentials missing. Balance unavailable.")
-            return 0.0
-
-        import time
-        import hmac
-        import hashlib
-        import base64
-
-        timestamp = str(int(time.time()))
-        method = "GET"
-        path = "/balance-allowance"
-        
-        # Simplified HMAC signature for L2 auth
-        message = f"{timestamp}{method}{path}"
-        key = base64.b64decode(secret)
-        signature = hmac.new(key, message.encode(), hashlib.sha256).digest()
-        signature_b64 = base64.b64encode(signature).decode()
-
-        headers = {
-            "POLY-API-KEY": api_key,
-            "POLY-API-SIGNATURE": signature_b64,
-            "POLY-API-TIMESTAMP": timestamp,
-            "POLY-API-PASSPHRASE": passphrase
-        }
-
-        try:
-            response = await self.client.get(f"{self.CLOB_URL}{path}", headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            # The response contains USDC balance (cash)
-            # data typically looks like {'balance': '123.45', 'allowance': '...'}
-            return float(data.get("balance", 0))
-        except Exception as e:
-            logger.error(f"Error fetching Polymarket balance: {e}")
-            return 0.0
+        response = await self.client.get(url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict) and isinstance(payload.get("history"), list):
+            payload["history"] = payload["history"][-limit:]
+        return payload
 
     async def close(self):
         await self.client.aclose()

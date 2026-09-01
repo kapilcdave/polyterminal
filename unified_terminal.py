@@ -1,27 +1,24 @@
-import os
 import asyncio
 import json
 import logging
-import threading
+import os
 from datetime import datetime
 
 from dotenv import load_dotenv
-load_dotenv()
-
+from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Static, RichLog, Label, DataTable
 from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual import work
+from textual.widgets import DataTable, Footer, Label, RichLog, Static
 
 from kalshi_client import KalshiClient
 from live_engine import LiveEngine
 from polymarket_client import PolymarketClient
 from unified_store import UnifiedStore
 
-# Configure logging to hide noise
-logging.basicConfig(level=logging.ERROR)
+
+load_dotenv()
 logger = logging.getLogger("UnifiedTerminal")
 
 class BloombergTicker(Static):
@@ -32,9 +29,11 @@ class BloombergTicker(Static):
 
     def update_ticker(self):
         now = datetime.now().strftime("%H:%M:%S")
+        app = self.app
+        environment = getattr(getattr(app, "kalshi", None), "env", "demo").upper()
+        source = "MOCK DATA" if getattr(getattr(app, "kalshi", None), "use_mock", False) else "READ ONLY"
         self.update(
-            f" [bold cyan]LIVE STREAM[/] | KALSHI: [green]DEMO[/] | POLY: [green]ACTIVE[/] | "
-            f"DXY: 104.20 (-0.05%) | BTC: 67,890 (+2.34%) | {now} "
+            f" [bold cyan]POLYTERMINAL[/] | {source} | KALSHI: {environment} | {now} "
         )
 
 class TerminalStatus(Static):
@@ -72,6 +71,15 @@ class UnifiedTerminal(App):
 
     #sidebar {
         width: 40%;
+    }
+
+    #main-area.logs-hidden #market-pane {
+        width: 1fr;
+        border-right: none;
+    }
+
+    #main-area.logs-hidden #sidebar {
+        display: none;
     }
 
     #websocket-pane {
@@ -126,11 +134,12 @@ class UnifiedTerminal(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh Markets"),
         Binding("c", "clear_logs", "Clear Logs"),
-        Binding("t", "toggle_logs", "Toggle WebSockets"),
+        Binding("t", "toggle_logs", "Toggle Feed Log"),
     ]
 
     def __init__(self):
         super().__init__()
+        self.market_limit = self._market_limit_from_env()
         self.store = UnifiedStore()
         self.kalshi = KalshiClient()
         self.poly = PolymarketClient()
@@ -146,8 +155,20 @@ class UnifiedTerminal(App):
             poly_api_passphrase=os.getenv("POLYMARKET_API_PASSPHRASE"),
         )
         self.show_logs = True
-        self.market_map = {} # row_index -> market_id
-        self.market_limit = int(os.getenv("POLYTERMINAL_MARKET_LIMIT", "100"))
+        self.market_map = {}
+        self._table_update_pending = False
+        self._connection_statuses = {}
+
+    @staticmethod
+    def _market_limit_from_env() -> int:
+        raw_limit = os.getenv("POLYTERMINAL_MARKET_LIMIT", "100")
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise ValueError("POLYTERMINAL_MARKET_LIMIT must be an integer") from exc
+        if not 1 <= limit <= 1000:
+            raise ValueError("POLYTERMINAL_MARKET_LIMIT must be between 1 and 1000")
+        return limit
 
     def compose(self) -> ComposeResult:
         yield BloombergTicker(id="ticker")
@@ -177,33 +198,46 @@ class UnifiedTerminal(App):
         self.engine.add_raw_callback(self._on_raw_ws)
         self.engine.add_status_callback(self._on_connection_status)
         
-        # Start background engines
-        self.start_engines()
-        self.run_worker(self.refresh_market_snapshot(), exclusive=True, name="refresh-markets")
+        self.run_worker(
+            self._initialize_feeds(),
+            group="startup",
+            exclusive=True,
+            name="initialize-feeds",
+        )
 
-    @work
-    async def start_engines(self):
+    async def _initialize_feeds(self):
+        await self.refresh_market_snapshot()
         await self.engine.start()
 
     def _on_store_update(self, market, change_type):
-        if change_type == 'rebuild_complete' or change_type == 'new_market' or change_type in ['kalshi_update', 'poly_update']:
-            self._schedule_ui_update(self.update_market_table)
+        if change_type in {"rebuild_complete", "new_market", "kalshi_update", "poly_update"}:
+            self._queue_table_update()
 
     def _on_connection_status(self, status):
-        state = "connected" if status.connected else "reconnecting"
-        msg = (
-            f"{status.platform}: {state}; "
-            f"{status.messages_received} messages"
-        )
-        if status.message and status.message != "connected":
-            msg = f"{msg}; {status.message}"
-        self._schedule_ui_update(self._set_status_message, msg)
+        self._connection_statuses[status.platform] = status
+        parts = []
+        for platform in ("kalshi", "polymarket", "polymarket_user"):
+            current = self._connection_statuses.get(platform)
+            if not current:
+                continue
+            if current.connected:
+                state = f"connected ({current.messages_received})"
+            elif current.message.startswith("missing"):
+                state = "disabled: credentials missing"
+            else:
+                state = current.message or "disconnected"
+            parts.append(f"{platform}: {state}")
+        self.call_later(self._set_status_message, " | ".join(parts))
 
-    def _schedule_ui_update(self, callback, *args):
-        if self._loop is not None and self._thread_id != threading.get_ident():
-            self.call_from_thread(self.call_later, callback, *args)
-        else:
-            self.call_later(callback, *args)
+    def _queue_table_update(self):
+        if self._table_update_pending:
+            return
+        self._table_update_pending = True
+        self.set_timer(0.1, self._flush_market_table)
+
+    def _flush_market_table(self):
+        self._table_update_pending = False
+        self.update_market_table()
 
     def _set_status_message(self, message: str):
         self.query_one("#status-bar", TerminalStatus).message = message
@@ -218,17 +252,26 @@ class UnifiedTerminal(App):
             return_exceptions=True
         )
 
-        if isinstance(kalshi_markets, Exception):
+        errors = []
+        if isinstance(kalshi_markets, BaseException):
             logger.error("Kalshi refresh failed: %s", kalshi_markets)
-            kalshi_markets = []
-        if isinstance(poly_markets, Exception):
+            errors.append(f"Kalshi: {kalshi_markets}")
+            kalshi_markets = None
+        if isinstance(poly_markets, BaseException):
             logger.error("Polymarket refresh failed: %s", poly_markets)
-            poly_markets = []
+            errors.append(f"Polymarket: {poly_markets}")
+            poly_markets = None
 
         await self.store.rebuild_from_feeds(kalshi_markets, poly_markets)
+        if poly_markets is not None and hasattr(self.engine, "configure_poly_markets"):
+            self.engine.configure_poly_markets(poly_markets)
+        if errors:
+            self._set_status_message("Partial refresh | " + " | ".join(errors))
+            return False
         self._set_status_message(
             f"Loaded {len(kalshi_markets)} Kalshi and {len(poly_markets)} Polymarket markets.",
         )
+        return True
 
     def update_market_table(self):
         table = self.query_one("#market-table", DataTable)
@@ -242,14 +285,14 @@ class UnifiedTerminal(App):
         self.market_map = {}
         
         for i, m in enumerate(markets):
-            k_price = f"{m.kalshi_price:.2f}" if m.kalshi_price > 0 else "-"
-            p_price = f"{m.poly_price:.2f}" if m.poly_price > 0 else "-"
+            k_price = f"{m.kalshi_price:.2f}" if m.kalshi_price is not None else "-"
+            p_price = f"{m.poly_price:.2f}" if m.poly_price is not None else "-"
             
             delta = "-"
-            if m.has_both_prices:
+            if m.has_comparable_prices:
                 d_val = m.delta_percent
-                color = "green" if d_val > 0 else "red"
-                delta = f"[{color}]{d_val:+.1f}%[/]"
+                color = "green" if d_val > 0 else "red" if d_val < 0 else "white"
+                delta = Text(f"{d_val:+.1f}%", style=color)
             
             vol = self.format_volume(m.total_volume)
             
@@ -257,53 +300,73 @@ class UnifiedTerminal(App):
             status = "●" if m.has_both_prices else "○"
             
             table.add_row(
-                f"{status} {m.event_name[:35]}",
+                Text(f"{status} {m.event_name[:50]}"),
                 k_price,
                 p_price,
                 delta,
-                vol
+                vol,
+                key=m.id,
             )
             self.market_map[i] = m.id
 
     def format_volume(self, vol) -> str:
-        if vol >= 1_000_000: return f"{vol/1_000_000:.1f}M"
-        if vol >= 1_000: return f"{vol/1_000:.0f}K"
+        if vol >= 1_000_000:
+            return f"{vol/1_000_000:.1f}M"
+        if vol >= 1_000:
+            return f"{vol/1_000:.0f}K"
         return str(vol)
 
     def _on_raw_ws(self, platform, message):
         try:
             data = json.loads(message)
-            msg_type = data.get('type', 'data')
-            if msg_type == 'heartbeat': return # skip noise
-            
+            if isinstance(data, dict):
+                msg_type = data.get("type") or data.get("event_type") or "data"
+            elif isinstance(data, list):
+                msg_type = f"batch[{len(data)}]"
+            else:
+                msg_type = "data"
+            if msg_type == "heartbeat":
+                return
+
             color = "cyan" if platform == "kalshi" else "magenta"
-            formatted = f"[{color}]{platform.upper()}[/] | {msg_type} | {str(data)[:80]}..."
-            
-            self._schedule_ui_update(self._write_ws_log, formatted)
-        except Exception:
-            pass
+            formatted = Text()
+            formatted.append(platform.upper(), style=color)
+            formatted.append(f" | {msg_type} | {str(data)[:100]}")
+            self.call_later(self._write_ws_log, formatted)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Ignoring malformed WebSocket log frame from %s", platform)
 
     def _write_ws_log(self, message: str):
         self.query_one("#ws-log").write(message)
 
     def action_toggle_logs(self):
         self.show_logs = not self.show_logs
-        sidebar = self.query_one("#websocket-pane")
-        sidebar.display = self.show_logs
+        self.query_one("#main-area").set_class(not self.show_logs, "logs-hidden")
 
     def action_clear_logs(self):
         self.query_one("#ws-log").clear()
 
     def action_refresh(self):
-        self.run_worker(self.refresh_market_snapshot(), exclusive=True, name="refresh-markets")
+        self.run_worker(
+            self.refresh_market_snapshot(),
+            group="refresh",
+            exclusive=True,
+            name="refresh-markets",
+        )
 
     async def on_unmount(self):
-        await self.engine.stop()
-        if hasattr(self.kalshi, 'close'):
-            await self.kalshi.close()
-        await self.poly.close()
+        self.store.unsubscribe(self._on_store_update)
+        try:
+            await self.engine.stop()
+        finally:
+            try:
+                if hasattr(self.kalshi, "close"):
+                    await self.kalshi.close()
+            finally:
+                await self.poly.close()
 
 def main():
+    logging.basicConfig(level=os.getenv("POLYTERMINAL_LOG_LEVEL", "WARNING"))
     app = UnifiedTerminal()
     app.run()
 

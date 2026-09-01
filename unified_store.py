@@ -1,10 +1,16 @@
 import asyncio
+import inspect
+import logging
 import time
-from typing import Dict, List, Callable, Optional, Any
-from dataclasses import dataclass, field
 from collections import defaultdict
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, List, Optional
 
-from market_matcher import UnifiedMarket, MarketMatcher
+from market_matcher import MarketMatcher, UnifiedMarket
+
+
+logger = logging.getLogger("UnifiedStore")
 
 
 @dataclass
@@ -21,8 +27,10 @@ class UnifiedStore:
         self.markets: Dict[str, UnifiedMarket] = {}
         self.matcher = MarketMatcher()
         self._subscribers: List[Callable] = []
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
         self._price_history: Dict[str, List[PricePoint]] = defaultdict(list)
+        self._kalshi_index: Dict[str, str] = {}
+        self._poly_index: Dict[str, str] = {}
         self.max_history_size = 100
         
     def subscribe(self, callback: Callable):
@@ -31,67 +39,137 @@ class UnifiedStore:
     def unsubscribe(self, callback: Callable):
         if callback in self._subscribers:
             self._subscribers.remove(callback)
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
             
     async def _notify_subscribers(self, market: UnifiedMarket, change_type: str):
-        for callback in self._subscribers:
+        for callback in list(self._subscribers):
             try:
-                if asyncio.iscoroutinefunction(callback):
-                    await callback(market, change_type)
-                else:
-                    callback(market, change_type)
-            except Exception as e:
-                pass
+                result = callback(market, change_type)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("Store subscriber failed during %s", change_type)
                 
-    async def update_from_kalshi(self, ticker: str, price: float, volume: int):
-        async with self._lock:
-            for market in self.markets.values():
-                if market.kalshi_ticker == ticker:
+    async def update_from_kalshi(
+        self,
+        ticker: str,
+        price: Optional[float],
+        volume: Optional[int] = None,
+    ):
+        if not ticker or (price is not None and not 0 <= price <= 1):
+            return
+
+        async with self._get_lock():
+            market_id = self._kalshi_index.get(ticker)
+            market = self.markets.get(market_id) if market_id else None
+            if market:
+                if price is not None:
                     market.kalshi_price = price
+                if volume is not None:
                     market.kalshi_volume = volume
-                    market.last_update = time.time()
-                    self._add_price_point(market.id, kalshi_price=price, kalshi_volume=volume)
-                    await self._notify_subscribers(market, 'kalshi_update')
-                    return
-                    
-            new_market = UnifiedMarket(
-                id=f"kalshi_{ticker.lower()}",
-                event_name=ticker,
-                normalized_name=self.matcher.normalize_title(ticker),
-                kalshi_ticker=ticker,
-                kalshi_price=price,
-                kalshi_volume=volume
-            )
-            self.markets[new_market.id] = new_market
-            self._add_price_point(new_market.id, kalshi_price=price, kalshi_volume=volume)
-            await self._notify_subscribers(new_market, 'new_market')
-            
-    async def update_from_poly(self, token_id: str, question: str, price: float, volume: int):
-        async with self._lock:
-            norm_name = self.matcher.normalize_title(question)
-            market_id = self.matcher.create_market_id(norm_name)
-            
-            if market_id in self.markets:
-                market = self.markets[market_id]
-                market.poly_token_id = token_id
-                market.poly_question = question
-                market.poly_price = price
-                market.poly_volume = volume
                 market.last_update = time.time()
-                self._add_price_point(market_id, poly_price=price, poly_volume=volume)
-                await self._notify_subscribers(market, 'poly_update')
+                self._add_price_point(
+                    market.id,
+                    kalshi_price=price,
+                    kalshi_volume=market.kalshi_volume,
+                )
+                change_type = "kalshi_update"
             else:
+                market_id = self._available_id(f"kalshi_{self.matcher.create_market_id(ticker)}")
+                market = UnifiedMarket(
+                    id=market_id,
+                    event_name=ticker,
+                    normalized_name=self.matcher.normalize_title(ticker),
+                    kalshi_ticker=ticker,
+                    kalshi_price=price,
+                    kalshi_volume=volume or 0,
+                    last_update=time.time(),
+                )
+                self.markets[market.id] = market
+                self._kalshi_index[ticker] = market.id
+                self._add_price_point(
+                    market.id,
+                    kalshi_price=price,
+                    kalshi_volume=market.kalshi_volume,
+                )
+                change_type = "new_market"
+
+        await self._notify_subscribers(market, change_type)
+
+    async def update_from_poly(
+        self,
+        token_id: str,
+        question: str,
+        price: Optional[float],
+        volume: Optional[int] = None,
+    ):
+        if not token_id or (price is not None and not 0 <= price <= 1):
+            return
+
+        async with self._get_lock():
+            market_id = self._poly_index.get(token_id)
+            market = self.markets.get(market_id) if market_id else None
+            if not market and question:
+                normalized = self.matcher.normalize_title(question)
+                market = next(
+                    (item for item in self.markets.values() if item.normalized_name == normalized),
+                    None,
+                )
+
+            if market:
+                market.poly_token_id = token_id
+                if question:
+                    market.poly_question = question
+                if price is not None:
+                    market.poly_price = price
+                if volume is not None:
+                    market.poly_volume = volume
+                market.last_update = time.time()
+                self._poly_index[token_id] = market.id
+                self._add_price_point(
+                    market.id,
+                    poly_price=price,
+                    poly_volume=market.poly_volume,
+                )
+                change_type = "poly_update"
+            else:
+                norm_name = self.matcher.normalize_title(question)
+                market_id = self._available_id(
+                    f"poly_{self.matcher.create_market_id(norm_name or token_id)}"
+                )
                 new_market = UnifiedMarket(
                     id=market_id,
-                    event_name=question,
+                    event_name=question or f"Polymarket {token_id[:12]}",
                     normalized_name=norm_name,
                     poly_token_id=token_id,
                     poly_question=question,
                     poly_price=price,
-                    poly_volume=volume
+                    poly_volume=volume or 0,
+                    last_update=time.time(),
                 )
                 self.markets[new_market.id] = new_market
-                self._add_price_point(new_market.id, poly_price=price, poly_volume=volume)
-                await self._notify_subscribers(new_market, 'new_market')
+                self._poly_index[token_id] = new_market.id
+                self._add_price_point(
+                    new_market.id,
+                    poly_price=price,
+                    poly_volume=new_market.poly_volume,
+                )
+                market = new_market
+                change_type = "new_market"
+
+        await self._notify_subscribers(market, change_type)
+
+    def _available_id(self, base_id: str) -> str:
+        if base_id not in self.markets:
+            return base_id
+        suffix = 2
+        while f"{base_id}_{suffix}" in self.markets:
+            suffix += 1
+        return f"{base_id}_{suffix}"
                 
     def _add_price_point(
         self, 
@@ -101,8 +179,7 @@ class UnifiedStore:
         kalshi_volume: int = 0,
         poly_volume: int = 0
     ):
-        market = self.markets.get(market_id)
-        if not market:
+        if market_id not in self.markets or (kalshi_price is None and poly_price is None):
             return
             
         last_point = self._price_history[market_id][-1] if self._price_history[market_id] else None
@@ -140,14 +217,14 @@ class UnifiedStore:
         ]
         
     def get_price_history(self, market_id: str) -> List[PricePoint]:
-        return self._price_history.get(market_id, [])
+        return list(self._price_history.get(market_id, []))
 
     async def add_history_points(self, market_id: str, points: List[Dict[str, Any]], platform: str):
         """
         Batch add historical price points.
         points should have 'price' and 'timestamp'
         """
-        async with self._lock:
+        async with self._get_lock():
             for p in points:
                 ts = p.get('timestamp')
                 price = p.get('price')
@@ -181,34 +258,52 @@ class UnifiedStore:
         
     async def rebuild_from_feeds(
         self, 
-        kalshi_markets: List[Any], 
-        poly_markets: List[Any]
+        kalshi_markets: Optional[List[Any]],
+        poly_markets: Optional[List[Any]],
     ):
-        async with self._lock:
+        async with self._get_lock():
+            if kalshi_markets is None:
+                kalshi_markets = [
+                    SimpleNamespace(
+                        ticker=market.kalshi_ticker,
+                        title=market.event_name,
+                        yes_bid=market.kalshi_price,
+                        volume=market.kalshi_volume,
+                    )
+                    for market in self.markets.values()
+                    if market.kalshi_ticker
+                ]
+            if poly_markets is None:
+                poly_markets = [
+                    {
+                        "question": market.poly_question or market.event_name,
+                        "outcomePrices": [market.poly_price],
+                        "clobTokenIds": [market.poly_token_id],
+                        "volume": market.poly_volume,
+                    }
+                    for market in self.markets.values()
+                    if market.poly_token_id
+                ]
             unified = self.matcher.match_markets(kalshi_markets, poly_markets)
-            
-            for market_id, new_market in unified.items():
-                if market_id in self.markets:
-                    existing = self.markets[market_id]
-                    existing.kalshi_price = new_market.kalshi_price
-                    existing.kalshi_volume = new_market.kalshi_volume
-                    existing.kalshi_ticker = new_market.kalshi_ticker
-                    existing.poly_price = new_market.poly_price
-                    existing.poly_volume = new_market.poly_volume
-                    existing.poly_token_id = new_market.poly_token_id
-                    existing.poly_question = new_market.poly_question
-                    existing.last_update = time.time()
-                else:
-                    self.markets[market_id] = new_market
-                    
-            for callback in self._subscribers:
-                try:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(None, 'rebuild_complete')
-                    else:
-                        callback(None, 'rebuild_complete')
-                except Exception as e:
-                    pass
+            now = time.time()
+            for market in unified.values():
+                market.last_update = now
+            self.markets = unified
+            self._rebuild_indexes()
+
+        await self._notify_subscribers(None, "rebuild_complete")
+
+    def _rebuild_indexes(self) -> None:
+        self._kalshi_index = {
+            market.kalshi_ticker: market.id
+            for market in self.markets.values()
+            if market.kalshi_ticker
+        }
+        self._poly_index = {
+            market.poly_token_id: market.id
+            for market in self.markets.values()
+            if market.poly_token_id
+        }
                     
     def search_markets(self, query: str) -> List[UnifiedMarket]:
         norm_query = self.matcher.normalize_title(query)
