@@ -1,72 +1,96 @@
-# ⚡ PolyTerminal (Bloomberg Edition)
+# PolyTerminal
 
-A professional-grade, real-time terminal dashboard for monitoring **Kalshi** and **Polymarket** prediction markets. Built for professional traders with a focus on cross-platform arbitrage.
+[![CI](https://github.com/kapilcdave/polyterminal/actions/workflows/ci.yml/badge.svg)](https://github.com/kapilcdave/polyterminal/actions/workflows/ci.yml)
 
-## 🛡️ Security
-PolyTerminal is designed with security as a priority:
-- **Local Signing**: Your private keys never leave your machine. Polymarket orders are signed locally using the `py-clob-client` SDK.
-- **Environment Isolation**: All sensitive credentials (API Keys, Secrets, Private Keys) are stored in `.env` and excluded from Git via `.gitignore`.
-- **Zero-Storage**: The terminal does not store your keys in any database; they are loaded into memory only during runtime.
+PolyTerminal is a read-only terminal dashboard for monitoring active Kalshi and
+Polymarket prediction markets. It combines REST snapshots with live WebSocket
+updates, matches equivalent questions conservatively, and highlights price
+differences without placing orders.
 
-- **Multi-Platform Monitoring** — Side-by-side real-time view of Kalshi (USD) and Polymarket (USDC).
-- **Bloomberg-Style UI** — High-contrast, professional-grade TUI with distinct data panes and live clock.
-- **Cross-Platform Matching** — Inline "🔗" indicator for equivalent markets across platforms using fuzzy logic.
-- **Niche Filtering** — Instant category-based filtering (Financial, Politics, Sports, Science, etc.) with dedicated hotkeys.
-- **Theme Switcher** — Cycle through professional color schemes (Nord, Gruvbox, Dracual, etc.) on the fly.
-- **Live WebSocket Data** — Toggleable real-time price updates via direct WebSocket connections.
+## Features
 
-## Quick Start
+- Side-by-side Kalshi and Polymarket prices and volume
+- Conservative cross-platform matching with date, number, entity, and direction checks
+- Live public Polymarket and authenticated Kalshi WebSocket updates
+- Optional authenticated Polymarket user-event stream
+- Explicit offline mock mode with visible synthetic-data labeling
+- Local credential loading with no credential persistence
 
-### 1. Create a Virtual Environment
-```bash
-python -m venv venv
-source venv/bin/activate
-```
+PolyTerminal is monitoring software, not an execution client. It does not sign
+or submit orders.
 
-### 2. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
+## Requirements
 
-### 3. Configure Environment
-```bash
+- Python 3.9 or newer
+- A terminal with color support
+- Kalshi API credentials for the Kalshi WebSocket stream
+- Polymarket L2 credentials only if user-event monitoring is needed
+
+Public REST snapshots work without credentials. The app reports unavailable or
+disabled streams rather than silently replacing them with fake data.
+
+## Install
+
+```sh
+git clone https://github.com/kapilcdave/polyterminal.git
+cd polyterminal
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 cp .env.example .env
+polyterminal
 ```
-Edit `.env` with your Kalshi credentials. Polymarket public data works out of the box.
-Full WebSocket mode expects both Kalshi API credentials and Polymarket L2 API credentials.
 
-### 4. Run the Terminal
-```bash
+To run directly from a checkout:
+
+```sh
 python terminal_app.py
 ```
 
-Or install the local console command:
-```bash
-pip install -e .
-polyterminal
-```
+## Configuration
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `KALSHI_ENV` | No | `demo` (default) or `prod` |
+| `KALSHI_API_KEY` | Live Kalshi WS | Kalshi API key ID |
+| `KALSHI_PRIVATE_KEY_FILE` | Live Kalshi WS | Path to the RSA private key |
+| `POLYMARKET_API_KEY` | User WS only | Polymarket L2 API key |
+| `POLYMARKET_API_SECRET` | User WS only | Polymarket L2 secret |
+| `POLYMARKET_API_PASSPHRASE` | User WS only | Polymarket L2 passphrase |
+| `POLYTERMINAL_MARKET_LIMIT` | No | Snapshot size, from 1 to 1000 |
+| `POLYTERMINAL_MOCK_DATA` | No | Set `true` for explicit synthetic Kalshi data |
+| `POLYTERMINAL_LOG_LEVEL` | No | Python logging level; defaults to `WARNING` |
+
+Keep `.env` and private keys out of source control. If a key may have been
+committed or shared, revoke it at the exchange and create a replacement.
 
 ## Controls
 
 | Key | Action |
-|-----|--------|
-| `R` | Manual Refresh |
-| `T` | Toggle WebSocket Feed Pane |
-| `C` | Clear WebSocket Logs |
-| `Q` | Quit Terminal |
+| --- | --- |
+| `R` | Refresh market snapshots |
+| `T` | Toggle the raw feed log |
+| `C` | Clear the feed log |
+| `Q` | Quit |
 
-## Project Structure
+## Development
 
-- `unified_terminal.py`: Main Bloomberg-style TUI and layout logic.
-- `terminal_app.py`: Backward-compatible launcher.
-- `kalshi_client.py`: Interface for Kalshi REST & WebSocket APIs.
-- `polymarket_client.py`: Interface for Polymarket Gamma & CLOB.
-- `unified_store.py`: Shared state and data management.
+```sh
+python -m pip install -e ".[dev]"
+python -m unittest discover -v
+python -m compileall -q .
+python -m build
+```
+
+CI runs the test suite on Python 3.9, 3.11, and 3.13 and verifies that wheel and
+source distributions build successfully.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for private vulnerability reporting and
+credential-handling guidance.
 
 ## License
 
 MIT
-
----
-
-Made with ❤️ by Kapil

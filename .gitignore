@@ -10,11 +10,21 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Environment & Secrets
 .env
+.env.*
+!.env.example
 *.pem
 *.key
+*.p12
+*.pfx
 firstliveterminalkey.txt
 kalshi_key.pem
 polyterminal.txt
