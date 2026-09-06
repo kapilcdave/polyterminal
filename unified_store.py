@@ -59,8 +59,11 @@ class UnifiedStore:
         ticker: str,
         price: Optional[float],
         volume: Optional[int] = None,
+        live: bool = False,
+        bid: Optional[float] = None,
+        ask: Optional[float] = None,
     ):
-        if not ticker or (price is not None and not 0 <= price <= 1):
+        if not ticker or (price is None and volume is None and bid is None and ask is None) or (price is not None and not 0 <= price <= 1):
             return
 
         async with self._get_lock():
@@ -71,11 +74,19 @@ class UnifiedStore:
                     market.kalshi_price = price
                 if volume is not None:
                     market.kalshi_volume = volume
+                if bid is not None:
+                    market.kalshi_bid = bid
+                if ask is not None:
+                    market.kalshi_ask = ask
                 market.last_update = time.time()
+                market.kalshi_updated_at = market.last_update
+                market.kalshi_live = live
                 self._add_price_point(
                     market.id,
-                    kalshi_price=price,
+                    kalshi_price=market.kalshi_price,
+                    poly_price=market.poly_price,
                     kalshi_volume=market.kalshi_volume,
+                    poly_volume=market.poly_volume,
                 )
                 change_type = "kalshi_update"
             else:
@@ -86,8 +97,12 @@ class UnifiedStore:
                     normalized_name=self.matcher.normalize_title(ticker),
                     kalshi_ticker=ticker,
                     kalshi_price=price,
+                    kalshi_bid=bid,
+                    kalshi_ask=ask,
                     kalshi_volume=volume or 0,
                     last_update=time.time(),
+                    kalshi_updated_at=time.time(),
+                    kalshi_live=live,
                 )
                 self.markets[market.id] = market
                 self._kalshi_index[ticker] = market.id
@@ -106,8 +121,11 @@ class UnifiedStore:
         question: str,
         price: Optional[float],
         volume: Optional[int] = None,
+        live: bool = False,
+        bid: Optional[float] = None,
+        ask: Optional[float] = None,
     ):
-        if not token_id or (price is not None and not 0 <= price <= 1):
+        if not token_id or (price is None and volume is None and bid is None and ask is None) or (price is not None and not 0 <= price <= 1):
             return
 
         async with self._get_lock():
@@ -128,11 +146,19 @@ class UnifiedStore:
                     market.poly_price = price
                 if volume is not None:
                     market.poly_volume = volume
+                if bid is not None:
+                    market.poly_bid = bid
+                if ask is not None:
+                    market.poly_ask = ask
                 market.last_update = time.time()
+                market.poly_updated_at = market.last_update
+                market.poly_live = live
                 self._poly_index[token_id] = market.id
                 self._add_price_point(
                     market.id,
+                    kalshi_price=market.kalshi_price,
                     poly_price=price,
+                    kalshi_volume=market.kalshi_volume,
                     poly_volume=market.poly_volume,
                 )
                 change_type = "poly_update"
@@ -148,8 +174,12 @@ class UnifiedStore:
                     poly_token_id=token_id,
                     poly_question=question,
                     poly_price=price,
+                    poly_bid=bid,
+                    poly_ask=ask,
                     poly_volume=volume or 0,
                     last_update=time.time(),
+                    poly_updated_at=time.time(),
+                    poly_live=live,
                 )
                 self.markets[new_market.id] = new_market
                 self._poly_index[token_id] = new_market.id
@@ -268,6 +298,8 @@ class UnifiedStore:
                         ticker=market.kalshi_ticker,
                         title=market.event_name,
                         yes_bid=market.kalshi_price,
+                        yes_ask=market.kalshi_ask,
+                        last_price=market.kalshi_price,
                         volume=market.kalshi_volume,
                     )
                     for market in self.markets.values()
@@ -278,6 +310,8 @@ class UnifiedStore:
                     {
                         "question": market.poly_question or market.event_name,
                         "outcomePrices": [market.poly_price],
+                        "bestBid": market.poly_bid,
+                        "bestAsk": market.poly_ask,
                         "clobTokenIds": [market.poly_token_id],
                         "volume": market.poly_volume,
                     }
@@ -287,6 +321,33 @@ class UnifiedStore:
             unified = self.matcher.match_markets(kalshi_markets, poly_markets)
             now = time.time()
             for market in unified.values():
+                previous = self.markets.get(market.id)
+                if not previous and market.kalshi_ticker:
+                    old_id = self._kalshi_index.get(market.kalshi_ticker)
+                    previous = self.markets.get(old_id) if old_id else None
+                if not previous and market.poly_token_id:
+                    old_id = self._poly_index.get(market.poly_token_id)
+                    previous = self.markets.get(old_id) if old_id else None
+                if previous and previous.id != market.id and previous.id in self._price_history:
+                    self._price_history[market.id] = self._price_history.pop(previous.id)
+                if previous and previous.kalshi_live and now - previous.kalshi_updated_at < 15:
+                    market.kalshi_price = previous.kalshi_price
+                    market.kalshi_bid = previous.kalshi_bid
+                    market.kalshi_ask = previous.kalshi_ask
+                    market.kalshi_volume = previous.kalshi_volume
+                    market.kalshi_updated_at = previous.kalshi_updated_at
+                    market.kalshi_live = True
+                elif market.kalshi_ticker:
+                    market.kalshi_updated_at = now
+                if previous and previous.poly_live and now - previous.poly_updated_at < 15:
+                    market.poly_price = previous.poly_price
+                    market.poly_bid = previous.poly_bid
+                    market.poly_ask = previous.poly_ask
+                    market.poly_volume = previous.poly_volume
+                    market.poly_updated_at = previous.poly_updated_at
+                    market.poly_live = True
+                elif market.poly_token_id:
+                    market.poly_updated_at = now
                 market.last_update = now
             self.markets = unified
             self._rebuild_indexes()

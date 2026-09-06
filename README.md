@@ -55,9 +55,12 @@ python terminal_app.py
 | `KALSHI_ENV` | No | `demo` (default) or `prod` |
 | `KALSHI_API_KEY` | Live Kalshi WS | Kalshi API key ID |
 | `KALSHI_PRIVATE_KEY_FILE` | Live Kalshi WS | Path to the RSA private key |
+| `KALSHI_ENV_FILE` | No | Dotenv file containing `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` |
+| `POLYTERMINAL_ENABLE_KALSHI_WS` | No | Enable authenticated Kalshi live updates; defaults to `true` |
 | `POLYMARKET_API_KEY` | User WS only | Polymarket L2 API key |
 | `POLYMARKET_API_SECRET` | User WS only | Polymarket L2 secret |
 | `POLYMARKET_API_PASSPHRASE` | User WS only | Polymarket L2 passphrase |
+| `POLYTERMINAL_ENABLE_POLYMARKET_USER_WS` | No | Enable optional authenticated user events; defaults to `false` |
 | `POLYTERMINAL_MARKET_LIMIT` | No | Snapshot size, from 1 to 1000 |
 | `POLYTERMINAL_MOCK_DATA` | No | Set `true` for explicit synthetic Kalshi data |
 | `POLYTERMINAL_LOG_LEVEL` | No | Python logging level; defaults to `WARNING` |

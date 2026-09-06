@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -10,7 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Label, RichLog, Static
+from textual.widgets import DataTable, Footer, RichLog, Static
 
 from kalshi_client import KalshiClient
 from live_engine import LiveEngine
@@ -22,19 +23,58 @@ load_dotenv()
 logger = logging.getLogger("UnifiedTerminal")
 
 class BloombergTicker(Static):
-    """Sleek top ticker for market indices/status."""
+    """Compact title and clock bar."""
+
     def on_mount(self):
-        self.set_interval(2, self.update_ticker)
+        self.set_interval(1, self.update_ticker)
         self.update_ticker()
 
     def update_ticker(self):
         now = datetime.now().strftime("%H:%M:%S")
-        app = self.app
-        environment = getattr(getattr(app, "kalshi", None), "env", "demo").upper()
-        source = "MOCK DATA" if getattr(getattr(app, "kalshi", None), "use_mock", False) else "READ ONLY"
-        self.update(
-            f" [bold cyan]POLYTERMINAL[/] | {source} | KALSHI: {environment} | {now} "
-        )
+        title = "polyterminal"
+        width = max(self.size.width, len(title) + len(now) + 4)
+        title_start = (width - len(title)) // 2
+        time_start = width - len(now) - 1
+        line = [" "] * width
+        line[title_start:title_start + len(title)] = title
+        line[time_start:time_start + len(now)] = now
+        content = Text("".join(line))
+        content.stylize("bold white", title_start, title_start + len(title))
+        self.update(content)
+
+
+class PriceHistory(Static):
+    """Small venue-price chart for the selected market."""
+
+    BARS = " _.-=+*#%@"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.values = []
+        self.label = "RECENT PRICE UPDATES"
+
+    def set_values(self, values, label="RECENT PRICE UPDATES"):
+        self.values = [max(0.0, min(1.0, value)) for value in values if value is not None]
+        self.label = label
+        self.refresh()
+
+    def render(self) -> Text:
+        chart_width = max(12, min(42, self.size.width - 2))
+        values = self.values[-chart_width:]
+        content = Text(f"{self.label}\n", style="bold #6b7479", justify="center")
+        if not values:
+            content.append("\nWaiting for price updates", style="#5d666b")
+            return content
+
+        if len(values) < chart_width:
+            values = values + [values[-1]] * (chart_width - len(values))
+        for row in range(7, 0, -1):
+            threshold = row / 8
+            for value in values:
+                content.append("█" if value >= threshold else " ", style="#0077b6")
+            content.append("\n")
+        content.append("─" * len(values), style="#07536f")
+        return content
 
 class TerminalStatus(Static):
     """Dynamic status bar for market data connections."""
@@ -46,14 +86,14 @@ class TerminalStatus(Static):
 class UnifiedTerminal(App):
     CSS = """
     Screen {
-        background: #000000;
-        color: #ffffff;
+        background: #191919;
+        color: #d6d6d6;
     }
 
     #ticker {
         dock: top;
         height: 1;
-        background: #000080;
+        background: #1252a3;
         color: #ffffff;
         padding: 0 1;
         text-style: bold;
@@ -61,72 +101,133 @@ class UnifiedTerminal(App):
 
     #main-area {
         height: 1fr;
+        background: #191919;
     }
 
     #market-pane {
-        width: 60%;
-        border-right: solid #333333;
+        height: 48%;
         padding: 0 1;
-    }
-
-    #sidebar {
-        width: 40%;
-    }
-
-    #main-area.logs-hidden #market-pane {
-        width: 1fr;
-        border-right: none;
-    }
-
-    #main-area.logs-hidden #sidebar {
-        display: none;
-    }
-
-    #websocket-pane {
-        height: 1fr;
-        padding: 0 1;
-    }
-
-    .pane-title {
-        background: #111111;
-        color: #ff9900;
-        margin-bottom: 0;
-        padding: 0 1;
-        text-align: center;
+        border: solid #303437;
+        margin-top: 1;
     }
 
     #market-table {
         height: 1fr;
-        background: #000000;
+        background: #191919;
+        color: #d6d6d6;
         border: none;
     }
 
     DataTable > .datatable--header {
-        background: #1a1a1a;
-        color: #00ffff;
+        background: #26343b;
+        color: #e4eaed;
         text-style: bold;
     }
 
     DataTable > .datatable--cursor {
-        background: #222222;
+        background: #1252a3;
+        color: #ffffff;
+    }
+
+    DataTable > .datatable--hover {
+        background: #24313a;
+    }
+
+    #detail-divider {
+        height: 1;
+        margin-top: 1;
+        background: #00d26a;
+    }
+
+    #detail-pane {
+        height: 1fr;
+        padding: 1 1 0 1;
+    }
+
+    #market-title {
+        height: 3;
+        background: #26343b;
+        color: #00dc78;
+        text-style: bold;
+        content-align: center middle;
+    }
+
+    #quote-row {
+        height: 1fr;
+        align: center middle;
+    }
+
+    .quote-card {
+        width: 24%;
+        min-width: 24;
+        height: 12;
+        padding: 1;
+        margin: 1 2;
+        content-align: left middle;
+    }
+
+    #kalshi-card {
+        border: solid #00dc78;
+        color: #00dc78;
+    }
+
+    #poly-card {
+        border: solid #ff2455;
+        color: #ff466d;
+    }
+
+    #price-history {
+        width: 38%;
+        min-width: 30;
+        height: 12;
+        padding: 1 0;
+        color: #0077b6;
+        content-align: center middle;
+    }
+
+    #feed-pane {
+        display: none;
+        height: 1fr;
+        padding: 1;
+    }
+
+    #main-area.logs-visible #market-pane,
+    #main-area.logs-visible #detail-divider,
+    #main-area.logs-visible #detail-pane {
+        display: none;
+    }
+
+    #main-area.logs-visible #feed-pane {
+        display: block;
+    }
+
+    #feed-title {
+        height: 1;
+        background: #26343b;
+        color: #00dc78;
+        text-align: center;
+        text-style: bold;
     }
 
     #ws-log {
-        background: #050505;
-        color: #aaaaaa;
+        height: 1fr;
+        background: #191919;
+        color: #aeb7bb;
+        border: solid #303437;
     }
 
     #status-bar {
         dock: bottom;
         height: 1;
-        background: #1a1a1a;
-        color: #cccccc;
+        background: #191919;
+        color: #9aa7ad;
         padding: 0 1;
     }
 
     Footer {
-        background: #000000;
-        color: #fab387;
+        height: 1;
+        background: #26343b;
+        color: #d6d6d6;
     }
     """
     
@@ -148,15 +249,19 @@ class UnifiedTerminal(App):
         self.engine = LiveEngine(
             store=self.store,
             kalshi_env=os.getenv("KALSHI_ENV", "demo"),
-            kalshi_api_key=os.getenv("KALSHI_API_KEY"),
+            kalshi_api_key=self.kalshi.api_key,
             kalshi_private_key=self.kalshi.private_key_content if not self.kalshi.use_mock else None,
             poly_api_key=os.getenv("POLYMARKET_API_KEY"),
             poly_api_secret=os.getenv("POLYMARKET_API_SECRET"),
             poly_api_passphrase=os.getenv("POLYMARKET_API_PASSPHRASE"),
         )
-        self.show_logs = True
+        self.show_logs = False
         self.market_map = {}
+        self.selected_market_id = None
         self._table_update_pending = False
+        self._row_update_pending = False
+        self._pending_market_updates = set()
+        self._rebuilding_table = False
         self._connection_statuses = {}
 
     @staticmethod
@@ -172,24 +277,36 @@ class UnifiedTerminal(App):
 
     def compose(self) -> ComposeResult:
         yield BloombergTicker(id="ticker")
-        
-        with Horizontal(id="main-area"):
+
+        with Vertical(id="main-area"):
             with Vertical(id="market-pane"):
-                yield Label(" [bold underline]MARKET MONITOR[/]", classes="pane-title")
                 yield DataTable(id="market-table")
-            
-            with Vertical(id="sidebar"):
-                with Vertical(id="websocket-pane"):
-                    yield Label(" [bold underline]WEBSOCKET FEEDS[/]", classes="pane-title")
-                    yield RichLog(id="ws-log", highlight=True, wrap=True, max_lines=500)
-        
+            yield Static(id="detail-divider")
+            with Vertical(id="detail-pane"):
+                yield Static("Select a market", id="market-title")
+                with Horizontal(id="quote-row"):
+                    yield Static("KALSHI\n\n--", id="kalshi-card", classes="quote-card")
+                    yield PriceHistory(id="price-history")
+                    yield Static("POLYMARKET\n\n--", id="poly-card", classes="quote-card")
+            with Vertical(id="feed-pane"):
+                yield Static("LIVE FEED", id="feed-title")
+                yield RichLog(id="ws-log", highlight=True, wrap=True, max_lines=500)
+
         yield TerminalStatus(id="status-bar")
         yield Footer()
 
     async def on_mount(self) -> None:
         table = self.query_one("#market-table", DataTable)
-        table.add_columns("Market", "Kalshi", "Poly", "Δ%", "Vol")
+        table.add_column("Src", width=5, key="source")
+        table.add_column("Market", width=44, key="title")
+        table.add_column("Vol", width=7, key="volume")
+        table.add_column("K Bid", width=7, key="kalshi_bid")
+        table.add_column("K Ask", width=7, key="kalshi_ask")
+        table.add_column("P Bid", width=7, key="poly_bid")
+        table.add_column("P Ask", width=7, key="poly_ask")
+        table.add_column("Edge", width=8, key="delta")
         table.cursor_type = "row"
+        table.focus()
         
         # Connect to store updates
         self.store.subscribe(self._on_store_update)
@@ -210,8 +327,10 @@ class UnifiedTerminal(App):
         await self.engine.start()
 
     def _on_store_update(self, market, change_type):
-        if change_type in {"rebuild_complete", "new_market", "kalshi_update", "poly_update"}:
+        if change_type in {"rebuild_complete", "new_market"}:
             self._queue_table_update()
+        elif market and change_type in {"kalshi_update", "poly_update"}:
+            self._queue_market_update(market.id)
 
     def _on_connection_status(self, status):
         self._connection_statuses[status.platform] = status
@@ -221,13 +340,17 @@ class UnifiedTerminal(App):
             if not current:
                 continue
             if current.connected:
-                state = f"connected ({current.messages_received})"
+                state = f"live {current.updates_received}/{current.subscriptions}"
             elif current.message.startswith("missing"):
                 state = "disabled: credentials missing"
             else:
                 state = current.message or "disconnected"
             parts.append(f"{platform}: {state}")
         self.call_later(self._set_status_message, " | ".join(parts))
+        if self.selected_market_id:
+            market = self.store.get_market(self.selected_market_id)
+            if market:
+                self.call_later(self._show_market, market)
 
     def _queue_table_update(self):
         if self._table_update_pending:
@@ -238,6 +361,20 @@ class UnifiedTerminal(App):
     def _flush_market_table(self):
         self._table_update_pending = False
         self.update_market_table()
+
+    def _queue_market_update(self, market_id):
+        self._pending_market_updates.add(market_id)
+        if self._row_update_pending:
+            return
+        self._row_update_pending = True
+        self.set_timer(0.05, self._flush_market_updates)
+
+    def _flush_market_updates(self):
+        self._row_update_pending = False
+        market_ids = self._pending_market_updates
+        self._pending_market_updates = set()
+        for market_id in market_ids:
+            self._update_market_row(market_id)
 
     def _set_status_message(self, message: str):
         self.query_one("#status-bar", TerminalStatus).message = message
@@ -263,13 +400,16 @@ class UnifiedTerminal(App):
             poly_markets = None
 
         await self.store.rebuild_from_feeds(kalshi_markets, poly_markets)
+        if kalshi_markets is not None and hasattr(self.engine, "configure_kalshi_markets"):
+            self.engine.configure_kalshi_markets(kalshi_markets)
         if poly_markets is not None and hasattr(self.engine, "configure_poly_markets"):
             self.engine.configure_poly_markets(poly_markets)
         if errors:
             self._set_status_message("Partial refresh | " + " | ".join(errors))
             return False
         self._set_status_message(
-            f"Loaded {len(kalshi_markets)} Kalshi and {len(poly_markets)} Polymarket markets.",
+            f"Loaded {len(kalshi_markets)} Kalshi + {len(poly_markets)} Polymarket"
+            f" | {sum(m.has_both_prices for m in self.store.get_all_markets())} matched",
         )
         return True
 
@@ -277,39 +417,226 @@ class UnifiedTerminal(App):
         table = self.query_one("#market-table", DataTable)
         markets = self.store.get_all_markets()
         markets.sort(key=lambda x: x.total_volume, reverse=True)
-        
-        # Efficient update: try to update existing rows or rebuild if needed
-        # For simplicity in this version, we clear and repopulate
-        # A more performant way would be to track row keys
+
+        self._rebuilding_table = True
+        selected_id = self.selected_market_id
+        selected_row = 0
         table.clear(columns=False)
         self.market_map = {}
-        
-        for i, m in enumerate(markets):
-            k_price = f"{m.kalshi_price:.2f}" if m.kalshi_price is not None else "-"
-            p_price = f"{m.poly_price:.2f}" if m.poly_price is not None else "-"
-            
-            delta = "-"
-            if m.has_comparable_prices:
-                d_val = m.delta_percent
-                color = "green" if d_val > 0 else "red" if d_val < 0 else "white"
-                delta = Text(f"{d_val:+.1f}%", style=color)
-            
-            vol = self.format_volume(m.total_volume)
-            
-            # Simple icon for status
-            status = "●" if m.has_both_prices else "○"
-            
-            table.add_row(
-                Text(f"{status} {m.event_name[:50]}"),
-                k_price,
-                p_price,
-                delta,
-                vol,
-                key=m.id,
-            )
-            self.market_map[i] = m.id
 
-    def format_volume(self, vol) -> str:
+        for i, m in enumerate(markets):
+            table.add_row(*self._market_row(m), key=m.id)
+            self.market_map[i] = m.id
+            if m.id == selected_id:
+                selected_row = i
+
+        if markets:
+            selected = self.store.get_market(selected_id) if selected_id else None
+            self._show_market(selected or markets[0])
+            table.move_cursor(row=selected_row, animate=False, scroll=True)
+        else:
+            self._clear_market_detail()
+        self._rebuilding_table = False
+
+    def _market_row(self, market):
+        source = "K/P" if market.kalshi_ticker and market.poly_token_id else "K" if market.kalshi_ticker else "P"
+        source_color = "#00dc78" if source == "K/P" else "#5ca8ff" if source == "K" else "#c678dd"
+        delta = "-"
+        if market.has_comparable_prices:
+            value = market.delta_percent
+            color = "#00dc78" if value > 0 else "#ff466d" if value < 0 else "white"
+            delta = Text(f"{value:+.1f}%", style=color)
+        return (
+            Text(source, style=f"bold {source_color}"),
+            market.event_name,
+            self.format_volume(market.total_volume),
+            self._table_quote(market.kalshi_bid, market.kalshi_live),
+            self._table_quote(market.kalshi_ask, market.kalshi_live),
+            self._table_quote(market.poly_bid, market.poly_live),
+            self._table_quote(market.poly_ask, market.poly_live),
+            delta,
+        )
+
+    @staticmethod
+    def _table_quote(price, live):
+        if price is None:
+            return "  N/A"
+        marker = "*" if live else " "
+        color = "#00dc78" if live else "#d6d6d6"
+        return Text(f"{marker} {price:.3f}", style=color)
+
+    def _update_market_row(self, market_id):
+        market = self.store.get_market(market_id)
+        if not market:
+            return
+        table = self.query_one("#market-table", DataTable)
+        try:
+            for column, value in zip(
+                (
+                    "source", "title", "volume", "kalshi_bid", "kalshi_ask",
+                    "poly_bid", "poly_ask", "delta",
+                ),
+                self._market_row(market),
+            ):
+                table.update_cell(market_id, column, value)
+        except Exception:
+            self._queue_table_update()
+            return
+        if market_id == self.selected_market_id:
+            self._show_market(market)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if self._rebuilding_table:
+            return
+        self._select_row_key(event.row_key)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self._select_row_key(event.row_key)
+
+    def _select_row_key(self, row_key):
+        market_id = getattr(row_key, "value", row_key)
+        market = self.store.get_market(str(market_id))
+        if market:
+            self._show_market(market)
+
+    def _show_market(self, market):
+        selection_changed = market.id != self.selected_market_id
+        self.selected_market_id = market.id
+        title = Text(market.event_name, style="bold #00dc78", justify="center")
+        identifier = market.kalshi_ticker or market.poly_condition_id or market.id
+        title.append(f"\n{identifier}", style="#8b969b")
+        self.query_one("#market-title", Static).update(title)
+        self.query_one("#kalshi-card", Static).update(
+            self._venue_card(
+                "KALSHI",
+                market.kalshi_price,
+                market.kalshi_bid,
+                market.kalshi_ask,
+                market.kalshi_volume,
+                self._quote_state("kalshi", market),
+                market.kalshi_updated_at,
+            )
+        )
+        self.query_one("#poly-card", Static).update(
+            self._venue_card(
+                "POLYMARKET",
+                market.poly_price,
+                market.poly_bid,
+                market.poly_ask,
+                market.poly_volume,
+                self._quote_state("polymarket", market),
+                market.poly_updated_at,
+            )
+        )
+
+        history = self.store.get_price_history(market.id)
+        if market.poly_token_id:
+            values = [point.poly_price for point in history if point.poly_price is not None]
+            label = "POLYMARKET LIVE TRACE"
+        else:
+            values = [point.kalshi_price for point in history if point.kalshi_price is not None]
+            label = "KALSHI PRICE TRACE"
+        if not values:
+            values = [price for price in (market.kalshi_price, market.poly_price) if price is not None]
+        self.query_one("#price-history", PriceHistory).set_values(values, label)
+        if selection_changed:
+            self.run_worker(
+                self._poll_selected_market(market.id),
+                group="selected-market",
+                exclusive=True,
+                name="selected-market-quote",
+            )
+
+    def _quote_state(self, platform, market):
+        if platform == "kalshi" and not market.kalshi_ticker:
+            return "NOT LISTED"
+        if platform == "polymarket" and not market.poly_token_id:
+            return "NOT LISTED"
+        status = self._connection_statuses.get(platform)
+        is_live = market.kalshi_live if platform == "kalshi" else market.poly_live
+        if is_live and status and status.connected:
+            return "LIVE"
+        return "REST"
+
+    @staticmethod
+    def _venue_card(name, price, bid, ask, volume, state, updated_at) -> Text:
+        state_color = (
+            "#00dc78" if state == "LIVE"
+            else "#f0ad4e" if state == "REST"
+            else "#6b7479"
+        )
+        content = Text(name, style="bold")
+        content.append(f"  {state}", style=f"bold {state_color}")
+        if state == "NOT LISTED":
+            content.append("\n\nNo verified equivalent", style="#8b969b")
+            return content
+        content.append("\n\n")
+        content.append(f"{price:.3f}" if price is not None else "N/A", style="bold white")
+        bid_text = f"{bid:.3f}" if bid is not None else "N/A"
+        ask_text = f"{ask:.3f}" if ask is not None else "N/A"
+        content.append(f"\nBID {bid_text}  ASK {ask_text}", style="#b8c2c7")
+        content.append(f"\nVOL {UnifiedTerminal.format_volume(volume)}", style="#8b969b")
+        if updated_at:
+            content.append(f"\n{max(0, int(time.time() - updated_at))}s ago", style="#6b7479")
+        return content
+
+    async def _poll_selected_market(self, market_id):
+        while self.selected_market_id == market_id:
+            market = self.store.get_market(market_id)
+            if not market:
+                return
+            try:
+                kalshi_status = self._connection_statuses.get("kalshi")
+                kalshi_is_live = kalshi_status and kalshi_status.connected and market.kalshi_live
+                if market.kalshi_ticker and not kalshi_is_live and hasattr(self.kalshi, "get_market_orderbook"):
+                    book = await self.kalshi.get_market_orderbook(market.kalshi_ticker)
+                    if book.yes_bid is not None or book.yes_ask is not None:
+                        price = self._quote_price(book.yes_bid, book.yes_ask)
+                        await self.store.update_from_kalshi(
+                            market.kalshi_ticker,
+                            price,
+                            live=False,
+                            bid=book.yes_bid,
+                            ask=book.yes_ask,
+                        )
+                poly_status = self._connection_statuses.get("polymarket")
+                poly_is_live = poly_status and poly_status.connected and market.poly_live
+                if market.poly_token_id and not poly_is_live and hasattr(self.poly, "get_market_book"):
+                    book = await self.poly.get_market_book(market.poly_token_id)
+                    bids = book.get("bids", []) if isinstance(book, dict) else []
+                    prices = [float(level["price"]) for level in bids if level.get("price")]
+                    asks = book.get("asks", []) if isinstance(book, dict) else []
+                    ask_prices = [float(level["price"]) for level in asks if level.get("price")]
+                    if prices or ask_prices:
+                        bid = max(prices) if prices else None
+                        ask = min(ask_prices) if ask_prices else None
+                        await self.store.update_from_poly(
+                            market.poly_token_id,
+                            market.poly_question or market.event_name,
+                            self._quote_price(bid, ask),
+                            live=False,
+                            bid=bid,
+                            ask=ask,
+                        )
+            except Exception as exc:
+                logger.debug("Selected quote refresh failed: %s", exc)
+            await asyncio.sleep(2)
+
+    @staticmethod
+    def _quote_price(bid, ask):
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return bid if bid is not None else ask
+
+    def _clear_market_detail(self):
+        self.selected_market_id = None
+        self.query_one("#market-title", Static).update("No markets available")
+        self.query_one("#kalshi-card", Static).update("KALSHI\n\n--")
+        self.query_one("#poly-card", Static).update("POLYMARKET\n\n--")
+        self.query_one("#price-history", PriceHistory).set_values([])
+
+    @staticmethod
+    def format_volume(vol) -> str:
         if vol >= 1_000_000:
             return f"{vol/1_000_000:.1f}M"
         if vol >= 1_000:
@@ -341,7 +668,9 @@ class UnifiedTerminal(App):
 
     def action_toggle_logs(self):
         self.show_logs = not self.show_logs
-        self.query_one("#main-area").set_class(not self.show_logs, "logs-hidden")
+        self.query_one("#main-area").set_class(self.show_logs, "logs-visible")
+        if not self.show_logs:
+            self.query_one("#market-table", DataTable).focus()
 
     def action_clear_logs(self):
         self.query_one("#ws-log").clear()

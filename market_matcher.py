@@ -1,5 +1,7 @@
 import json
+import math
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
@@ -37,11 +39,16 @@ SYNONYMS = {
     "exceeds": "over",
     "below": "under",
     "less": "under",
-    "fall": "under",
     "falls": "under",
     "close": "closing",
     "finish": "closing",
     "finishes": "closing",
+    "nvidia": "nvda",
+}
+
+GENERIC_MATCH_TOKENS = {
+    "elect", "president", "nomination", "candidate", "party", "person",
+    "year", "award", "price", "value", "result", "contract", "question",
 }
 
 MONTHS = {
@@ -77,6 +84,8 @@ OPPOSITE_DIRECTIONS = {
     ("lose", "win"),
     ("yes", "no"),
     ("no", "yes"),
+    ("before", "after"),
+    ("after", "before"),
 }
 
 
@@ -87,11 +96,21 @@ class UnifiedMarket:
     normalized_name: str
     kalshi_ticker: Optional[str] = None
     kalshi_price: Optional[float] = None
+    kalshi_bid: Optional[float] = None
+    kalshi_ask: Optional[float] = None
     kalshi_volume: int = 0
     poly_token_id: Optional[str] = None
+    poly_condition_id: Optional[str] = None
     poly_question: Optional[str] = None
     poly_price: Optional[float] = None
+    poly_bid: Optional[float] = None
+    poly_ask: Optional[float] = None
     poly_volume: int = 0
+    match_confidence: Optional[float] = None
+    kalshi_updated_at: float = 0.0
+    poly_updated_at: float = 0.0
+    kalshi_live: bool = False
+    poly_live: bool = False
     price_history: List[Dict[str, Any]] = field(default_factory=list)
     last_update: float = 0.0
 
@@ -118,7 +137,6 @@ class UnifiedMarket:
 class MarketFeatures:
     normalized: str
     tokens: frozenset[str]
-    entities: frozenset[str]
     numbers: frozenset[str]
     dates: frozenset[str]
     directions: frozenset[str]
@@ -131,8 +149,11 @@ class SourceMarket:
     features: MarketFeatures
     ticker: Optional[str] = None
     price: Optional[float] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
     volume: int = 0
     token_id: Optional[str] = None
+    condition_id: Optional[str] = None
     raw: Any = None
 
 
@@ -147,7 +168,7 @@ class MarketMatcher:
         if not title:
             return ""
 
-        text = title.lower()
+        text = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode().lower()
         text = text.replace("&", " and ")
         text = re.sub(r"[$,%]", " ", text)
         text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -167,10 +188,9 @@ class MarketMatcher:
     def features_for_title(self, title: str) -> MarketFeatures:
         normalized = self.normalize_title(title)
         tokens = set(normalized.split())
-        entities = self._extract_entities(title, tokens)
         numbers = self._extract_numbers(title)
         dates = self._extract_dates(title)
-        directions = {DIRECTION_WORDS[t] for t in tokens if t in DIRECTION_WORDS}
+        directions = self._extract_directions(title, tokens)
 
         # Keep structured fields out of the bag-of-words score so a shared date
         # or threshold cannot overpower a different underlying question.
@@ -182,7 +202,6 @@ class MarketMatcher:
         return MarketFeatures(
             normalized=normalized,
             tokens=frozenset(bag_tokens),
-            entities=frozenset(entities),
             numbers=frozenset(numbers),
             dates=frozenset(dates),
             directions=frozenset(directions),
@@ -195,18 +214,47 @@ class MarketMatcher:
     ) -> Dict[str, UnifiedMarket]:
         kalshi = [self._source_from_kalshi(m) for m in kalshi_markets]
         poly = [self._source_from_poly(m) for m in poly_markets]
+        weights = self._token_weights(kalshi + poly)
 
         unified: Dict[str, UnifiedMarket] = {}
         used_kalshi: Set[int] = set()
+        used_poly: Set[int] = set()
 
-        for poly_market in poly:
-            best_idx, best_score = self._best_match(poly_market, kalshi, used_kalshi)
-            if best_idx is not None and best_score >= self.threshold:
-                used_kalshi.add(best_idx)
-                market = self._merge_sources(kalshi[best_idx], poly_market)
-            else:
-                market = self._unified_from_poly(poly_market)
+        inverted: Dict[str, Set[int]] = {}
+        for kalshi_idx, market in enumerate(kalshi):
+            for token in market.features.tokens - GENERIC_MATCH_TOKENS:
+                inverted.setdefault(token, set()).add(kalshi_idx)
+
+        candidates = []
+        for poly_idx, poly_market in enumerate(poly):
+            possible = set()
+            for token in poly_market.features.tokens - GENERIC_MATCH_TOKENS:
+                possible.update(inverted.get(token, ()))
+            for kalshi_idx in possible:
+                score = self._score_pair(poly_market, kalshi[kalshi_idx], weights)
+                if score >= self.threshold:
+                    candidates.append((score, poly_idx, kalshi_idx))
+
+        best_for_poly: Dict[int, float] = {}
+        best_for_kalshi: Dict[int, float] = {}
+        for score, poly_idx, kalshi_idx in candidates:
+            best_for_poly[poly_idx] = max(score, best_for_poly.get(poly_idx, 0.0))
+            best_for_kalshi[kalshi_idx] = max(score, best_for_kalshi.get(kalshi_idx, 0.0))
+
+        for score, poly_idx, kalshi_idx in sorted(candidates, reverse=True):
+            if poly_idx in used_poly or kalshi_idx in used_kalshi:
+                continue
+            if score < best_for_poly[poly_idx] or score < best_for_kalshi[kalshi_idx]:
+                continue
+            used_poly.add(poly_idx)
+            used_kalshi.add(kalshi_idx)
+            market = self._merge_sources(kalshi[kalshi_idx], poly[poly_idx], score)
             self._add_unique(unified, market)
+
+        for idx, poly_market in enumerate(poly):
+            if idx in used_poly:
+                continue
+            self._add_unique(unified, self._unified_from_poly(poly_market))
 
         for idx, kalshi_market in enumerate(kalshi):
             if idx in used_kalshi:
@@ -219,7 +267,7 @@ class MarketMatcher:
     def match_score(self, left_title: str, right_title: str) -> float:
         left = SourceMarket("left", left_title, self.features_for_title(left_title))
         right = SourceMarket("right", right_title, self.features_for_title(right_title))
-        return self._score_pair(left, right)
+        return self._score_pair(left, right, self._token_weights([left, right]))
 
     def fuzzy_match_single(
         self,
@@ -246,52 +294,39 @@ class MarketMatcher:
 
         return best_market if best_score >= self.threshold else None
 
-    def _best_match(
+    def _score_pair(
         self,
-        poly_market: SourceMarket,
-        kalshi_markets: List[SourceMarket],
-        used_kalshi: Set[int],
-    ) -> Tuple[Optional[int], float]:
-        best_idx = None
-        best_score = 0.0
-        for idx, kalshi_market in enumerate(kalshi_markets):
-            if idx in used_kalshi:
-                continue
-            score = self._score_pair(poly_market, kalshi_market)
-            if score > best_score:
-                best_idx = idx
-                best_score = score
-        return best_idx, best_score
-
-    def _score_pair(self, left: SourceMarket, right: SourceMarket) -> float:
-        if left.features.normalized and left.features.normalized == right.features.normalized:
-            return 1.0
-
+        left: SourceMarket,
+        right: SourceMarket,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> float:
         if self._blocked(left.features, right.features):
             return 0.0
 
-        token_score = self._jaccard(left.features.tokens, right.features.tokens)
-        entity_score = self._overlap(left.features.entities, right.features.entities)
-        number_score = self._structured_score(left.features.numbers, right.features.numbers)
-        date_score = self._structured_score(left.features.dates, right.features.dates)
-        direction_score = self._structured_score(left.features.directions, right.features.directions)
+        if left.features.normalized and left.features.normalized == right.features.normalized:
+            return 1.0
 
-        score = (
-            0.45 * token_score
-            + 0.20 * entity_score
-            + 0.15 * number_score
-            + 0.12 * date_score
-            + 0.08 * direction_score
+        token_score = self._weighted_overlap(
+            left.features.tokens,
+            right.features.tokens,
+            weights or {},
         )
-
-        # Require meaningful semantic overlap. Shared generic terms alone should
-        # not merge unrelated markets.
-        if token_score < 0.25 and entity_score == 0:
+        if token_score < 0.55:
             return 0.0
 
-        return score
+        score = token_score
+        if left.features.numbers and right.features.numbers:
+            score += 0.10
+        if left.features.dates and right.features.dates:
+            score += 0.10
+        if left.features.directions & right.features.directions:
+            score += 0.05
+        return min(score, 1.0)
 
     def _blocked(self, left: MarketFeatures, right: MarketFeatures) -> bool:
+        if ("not" in left.directions) != ("not" in right.directions):
+            return True
+
         if left.directions and right.directions:
             for pair in OPPOSITE_DIRECTIONS:
                 if pair[0] in left.directions and pair[1] in right.directions:
@@ -303,64 +338,86 @@ class MarketMatcher:
         if left.dates and right.dates and not self._compatible_dates(left.dates, right.dates):
             return True
 
-        if left.entities and right.entities and not (left.entities & right.entities):
-            # If both titles have explicit entities like tickers or proper names,
-            # do not let generic words such as "close" or "president" force a match.
-            return True
-
         return False
 
     def _source_from_kalshi(self, market: Any) -> SourceMarket:
         title = getattr(market, "title", "") or getattr(market, "event_title", "") or getattr(market, "ticker", "")
-        raw_price = getattr(market, "yes_bid", None)
-        if raw_price is None:
-            raw_price = getattr(market, "last_price", None)
+        bid = self._float_or_none(getattr(market, "yes_bid", None))
+        ask = self._float_or_none(getattr(market, "yes_ask", None))
+        last_price = self._float_or_none(getattr(market, "last_price", None))
         return SourceMarket(
             source="kalshi",
             title=title,
             features=self.features_for_title(title),
             ticker=getattr(market, "ticker", ""),
-            price=self._float_or_none(raw_price),
+            price=self._representative_price(bid, ask, last_price),
+            bid=bid,
+            ask=ask,
             volume=self._int_or_zero(getattr(market, "volume", 0)),
             raw=market,
         )
 
     def _source_from_poly(self, market: Dict[str, Any]) -> SourceMarket:
         title = market.get("question") or market.get("title") or market.get("slug") or ""
+        bid = self._float_or_none(market.get("bestBid"))
+        ask = self._float_or_none(market.get("bestAsk"))
+        snapshot_price = self._poly_yes_price(market)
         return SourceMarket(
             source="polymarket",
             title=title,
             features=self.features_for_title(title),
-            price=self._poly_yes_price(market),
+            price=self._representative_price(bid, ask, snapshot_price),
+            bid=bid,
+            ask=ask,
             volume=self._int_or_zero(market.get("volume", 0)),
             token_id=self._poly_token_id(market),
+            condition_id=(
+                market.get("conditionId")
+                or market.get("condition_id")
+                or market.get("condition")
+            ),
             raw=market,
         )
 
-    def _merge_sources(self, kalshi: SourceMarket, poly: SourceMarket) -> UnifiedMarket:
+    def _merge_sources(
+        self,
+        kalshi: SourceMarket,
+        poly: SourceMarket,
+        score: float,
+    ) -> UnifiedMarket:
         normalized = self._merged_normalized(kalshi, poly)
         return UnifiedMarket(
-            id=f"matched_{self.create_market_id(normalized)}",
+            id=f"kalshi_{self.create_market_id(kalshi.ticker or normalized)}",
             event_name=poly.title or kalshi.title,
             normalized_name=normalized,
             kalshi_ticker=kalshi.ticker,
             kalshi_price=kalshi.price,
+            kalshi_bid=kalshi.bid,
+            kalshi_ask=kalshi.ask,
             kalshi_volume=kalshi.volume,
             poly_token_id=poly.token_id,
+            poly_condition_id=poly.condition_id,
             poly_question=poly.title,
             poly_price=poly.price,
+            poly_bid=poly.bid,
+            poly_ask=poly.ask,
             poly_volume=poly.volume,
+            match_confidence=score,
         )
 
     def _unified_from_poly(self, poly: SourceMarket) -> UnifiedMarket:
-        market_id = f"poly_{self.create_market_id(poly.features.normalized)}"
+        stable_id = poly.condition_id or poly.token_id or poly.features.normalized
+        market_id = f"poly_{self.create_market_id(stable_id)}"
         return UnifiedMarket(
             id=market_id,
             event_name=poly.title,
             normalized_name=poly.features.normalized,
             poly_token_id=poly.token_id,
+            poly_condition_id=poly.condition_id,
             poly_question=poly.title,
             poly_price=poly.price,
+            poly_bid=poly.bid,
+            poly_ask=poly.ask,
             poly_volume=poly.volume,
         )
 
@@ -372,12 +429,13 @@ class MarketMatcher:
             normalized_name=kalshi.features.normalized,
             kalshi_ticker=kalshi.ticker,
             kalshi_price=kalshi.price,
+            kalshi_bid=kalshi.bid,
+            kalshi_ask=kalshi.ask,
             kalshi_volume=kalshi.volume,
         )
 
     def _merged_normalized(self, kalshi: SourceMarket, poly: SourceMarket) -> str:
         pieces = sorted(kalshi.features.tokens | poly.features.tokens)
-        pieces.extend(sorted(kalshi.features.entities | poly.features.entities))
         pieces.extend(sorted(kalshi.features.numbers | poly.features.numbers))
         pieces.extend(sorted(kalshi.features.dates | poly.features.dates))
         pieces.extend(sorted(kalshi.features.directions | poly.features.directions))
@@ -395,31 +453,28 @@ class MarketMatcher:
         market.id = self._unique_id(existing, market.id)
         existing[market.id] = market
 
-    def _extract_entities(self, title: str, tokens: Set[str]) -> Set[str]:
-        entities: Set[str] = set()
-
-        for ticker in re.findall(r"\(([A-Z]{1,6})\)", title):
-            entities.add(ticker.lower())
-
-        for symbol in re.findall(r"\b[A-Z]{2,6}\b", title):
-            if symbol.lower() not in {"will", "the", "and", "yes", "no"}:
-                entities.add(symbol.lower())
-
-        # Keep uncommon content words as soft entities. This catches people,
-        # teams, and company names without a full NER dependency.
-        for token in tokens:
-            if len(token) >= 5 and token not in DIRECTION_WORDS:
-                entities.add(token)
-
-        return entities
-
     def _extract_numbers(self, title: str) -> Set[str]:
         numbers = set()
-        for raw in re.findall(r"(?<![a-zA-Z])\$?\d+(?:,\d{3})*(?:\.\d+)?%?", title):
+        text = re.sub(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", " ", title)
+        text = re.sub(
+            r"\b(?:" + "|".join(MONTHS) + r")\.?\s+\d{1,2}(?!\d)(?:st|nd|rd|th)?(?:,?\s+20\d{2})?",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\b\d{1,2}(?!\d)(?:st|nd|rd|th)?\s+(?:" + "|".join(MONTHS) + r")(?:,?\s+20\d{2})?",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+        for raw in re.findall(r"(?<![a-zA-Z0-9])[+-]?\$?\d+(?:,\d{3})*(?:\.\d+)?%?", text):
             cleaned = raw.replace("$", "").replace(",", "").replace("%", "")
             try:
                 value = float(cleaned)
             except ValueError:
+                continue
+            if 2000 <= abs(value) <= 2099:
                 continue
             if value.is_integer():
                 numbers.add(str(int(value)))
@@ -430,6 +485,11 @@ class MarketMatcher:
     def _extract_dates(self, title: str) -> Set[str]:
         text = title.lower()
         dates: Set[str] = set()
+        occupied: List[Tuple[int, int]] = []
+
+        for match in re.finditer(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", text):
+            dates.add(f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}")
+            occupied.append(match.span())
 
         for match in re.finditer(
             r"\b(" + "|".join(MONTHS) + r")\.?\s+([0-2]?\d|3[01])(?!\d)(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?",
@@ -439,6 +499,7 @@ class MarketMatcher:
             day = int(match.group(2))
             year = match.group(3) or "????"
             dates.add(f"{year}-{month}-{day:02d}")
+            occupied.append(match.span())
 
         for match in re.finditer(
             r"\b([0-2]?\d|3[01])(?!\d)(?:st|nd|rd|th)?\s+(" + "|".join(MONTHS) + r")(?:,?\s+(\d{4}))?",
@@ -448,33 +509,50 @@ class MarketMatcher:
             month = MONTHS[match.group(2)]
             year = match.group(3) or "????"
             dates.add(f"{year}-{month}-{day:02d}")
+            occupied.append(match.span())
 
         for match in re.finditer(r"\b(" + "|".join(MONTHS) + r")\b(?:\s+(\d{4}))?", text):
+            if any(start <= match.start() < end for start, end in occupied):
+                continue
             month = MONTHS[match.group(1)]
             year = match.group(2) or "????"
             dates.add(f"{year}-{month}")
+            occupied.append(match.span())
 
-        for year in re.findall(r"\b20\d{2}\b", text):
-            dates.add(year)
+        for match in re.finditer(r"\b20\d{2}\b", text):
+            if not any(start <= match.start() < end for start, end in occupied):
+                dates.add(match.group(0))
 
         return dates
 
     def _poly_token_id(self, market: Dict[str, Any]) -> Optional[str]:
         tokens = self._json_list(market.get("tokens"))
+        outcomes = self._json_list(market.get("outcomes"))
+        yes_index = self._yes_index(outcomes)
         if tokens and isinstance(tokens[0], dict):
-            return tokens[0].get("token_id") or tokens[0].get("id")
+            index = min(yes_index, len(tokens) - 1)
+            return tokens[index].get("token_id") or tokens[index].get("id")
 
         clob_token_ids = self._json_list(market.get("clobTokenIds"))
         if clob_token_ids:
-            return str(clob_token_ids[0])
+            return str(clob_token_ids[min(yes_index, len(clob_token_ids) - 1)])
 
         return None
 
     def _poly_yes_price(self, market: Dict[str, Any]) -> Optional[float]:
         outcome_prices = self._json_list(market.get("outcomePrices"))
         if outcome_prices:
-            return self._float_or_none(outcome_prices[0])
+            outcomes = self._json_list(market.get("outcomes"))
+            index = min(self._yes_index(outcomes), len(outcome_prices) - 1)
+            return self._float_or_none(outcome_prices[index])
         return None
+
+    @staticmethod
+    def _yes_index(outcomes: List[Any]) -> int:
+        for index, outcome in enumerate(outcomes):
+            if str(outcome).strip().lower() == "yes":
+                return index
+        return 0
 
     @staticmethod
     def _json_list(value: Any) -> List[Any]:
@@ -501,6 +579,18 @@ class MarketMatcher:
         return value if 0 <= value <= 1 else None
 
     @staticmethod
+    def _representative_price(
+        bid: Optional[float],
+        ask: Optional[float],
+        fallback: Optional[float],
+    ) -> Optional[float]:
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        if fallback is not None and fallback > 0:
+            return fallback
+        return bid if bid is not None else ask
+
+    @staticmethod
     def _int_or_zero(value: Any) -> int:
         try:
             return int(float(value))
@@ -508,41 +598,71 @@ class MarketMatcher:
             return 0
 
     @staticmethod
-    def _jaccard(left: FrozenSet[str], right: FrozenSet[str]) -> float:
-        if not left and not right:
-            return 0.0
-        union = left | right
-        return len(left & right) / len(union) if union else 0.0
+    def _token_weights(markets: List[SourceMarket]) -> Dict[str, float]:
+        document_frequency: Dict[str, int] = {}
+        for market in markets:
+            for token in market.features.tokens:
+                document_frequency[token] = document_frequency.get(token, 0) + 1
+        total = max(1, len(markets))
+        return {
+            token: (0.2 if token in GENERIC_MATCH_TOKENS else 1.0)
+            * (1.0 + math.log((total + 1) / (frequency + 1)))
+            for token, frequency in document_frequency.items()
+        }
 
     @staticmethod
-    def _overlap(left: FrozenSet[str], right: FrozenSet[str]) -> float:
+    def _weighted_overlap(
+        left: FrozenSet[str],
+        right: FrozenSet[str],
+        weights: Dict[str, float],
+    ) -> float:
         if not left or not right:
             return 0.0
-        return len(left & right) / min(len(left), len(right))
-
-    def _structured_score(self, left: frozenset[str], right: frozenset[str]) -> float:
-        if not left and not right:
-            return 0.5
-        if not left or not right:
-            return 0.25
-        return self._overlap(left, right)
+        shared = sum(weights.get(token, 1.0) for token in left & right)
+        total = sum(weights.get(token, 1.0) for token in left) + sum(
+            weights.get(token, 1.0) for token in right
+        )
+        return (2 * shared) / total if total else 0.0
 
     @staticmethod
     def _compatible_structured(left: frozenset[str], right: frozenset[str]) -> bool:
-        return bool(left & right)
+        return left == right
 
     @staticmethod
     def _compatible_dates(left: frozenset[str], right: frozenset[str]) -> bool:
         for ldate in left:
             for rdate in right:
-                if ldate == rdate:
-                    return True
-                if len(ldate) == 7 and rdate.startswith(ldate):
-                    return True
-                if len(rdate) == 7 and ldate.startswith(rdate):
-                    return True
-                if len(ldate) == 4 and rdate.startswith(ldate):
-                    return True
-                if len(rdate) == 4 and ldate.startswith(rdate):
+                left_parts = ldate.split("-")
+                right_parts = rdate.split("-")
+                compatible = True
+                shared = False
+                for index in range(max(len(left_parts), len(right_parts))):
+                    lpart = left_parts[index] if index < len(left_parts) else "????"
+                    rpart = right_parts[index] if index < len(right_parts) else "????"
+                    if lpart != "????" and rpart != "????" and lpart != rpart:
+                        compatible = False
+                        break
+                    if lpart != "????" and rpart != "????" and lpart == rpart:
+                        shared = True
+                if compatible and shared:
                     return True
         return False
+
+    @staticmethod
+    def _extract_directions(title: str, tokens: Set[str]) -> Set[str]:
+        text = title.lower()
+        directions = {DIRECTION_WORDS[token] for token in tokens if token in DIRECTION_WORDS}
+        if re.search(r"(?:<|\bat most\b|\bor less\b|\bno more than\b)", text):
+            directions.add("under")
+        if re.search(r"(?:>|\bat least\b|\bor more\b|\bno less than\b)", text):
+            directions.add("over")
+        if re.search(r"\bbefore\b", text):
+            directions.add("before")
+        if re.search(r"\bafter\b", text):
+            directions.add("after")
+        if re.search(
+            r"\b(?:not|won't|will not|doesn't|does not|isn't|is not|fails? to)\b",
+            text,
+        ):
+            directions.add("not")
+        return directions

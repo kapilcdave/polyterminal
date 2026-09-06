@@ -3,13 +3,14 @@ import logging
 import os
 import random
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 
 load_dotenv()
@@ -32,8 +33,27 @@ class KalshiClient:
     PROD_URL = "https://external-api.kalshi.com/trade-api/v2"
 
     def __init__(self):
-        self.api_key = os.getenv("KALSHI_API_KEY")
-        self.private_key_path = os.getenv("KALSHI_PRIVATE_KEY_FILE")
+        credentials = self._credential_values()
+        direct_api_key = os.getenv("KALSHI_API_KEY", "")
+        if direct_api_key.lower().startswith("your_"):
+            direct_api_key = ""
+        self.api_key = (
+            direct_api_key
+            or os.getenv("KALSHI_API_KEY_ID")
+            or credentials.get("KALSHI_API_KEY_ID")
+            or credentials.get("KALSHI_API_KEY")
+        )
+        direct_key_path = os.getenv("KALSHI_PRIVATE_KEY_FILE", "")
+        if not direct_api_key:
+            direct_key_path = ""
+        self.private_key_path = (
+            direct_key_path
+            or os.getenv("KALSHI_PRIVATE_KEY_PATH")
+            or credentials.get("KALSHI_PRIVATE_KEY_PATH")
+            or credentials.get("KALSHI_PRIVATE_KEY_FILE")
+        )
+        if self.private_key_path:
+            self.private_key_path = os.path.expandvars(os.path.expanduser(self.private_key_path))
         self.private_key_content = None
         if self.private_key_path:
             try:
@@ -53,6 +73,17 @@ class KalshiClient:
         }
         self.host = self.PROD_URL if self.env == "prod" else self.DEMO_URL
         self.client = httpx.AsyncClient(base_url=self.host, timeout=10.0)
+
+    @staticmethod
+    def _credential_values() -> Dict[str, Optional[str]]:
+        raw_path = os.getenv("KALSHI_ENV_FILE", "")
+        if not raw_path:
+            return {}
+        path = Path(os.path.expandvars(os.path.expanduser(raw_path)))
+        if not path.is_file():
+            logger.error("KALSHI_ENV_FILE does not exist: %s", path)
+            return {}
+        return dict(dotenv_values(path))
 
     async def login(self):
         return None
@@ -76,7 +107,11 @@ class KalshiClient:
                 for index in range(limit)
             ]
 
-        params: Dict[str, Any] = {"limit": limit, "status": "open"}
+        params: Dict[str, Any] = {
+            "limit": limit,
+            "status": "open",
+            "mve_filter": "exclude",
+        }
         if cursor:
             params["cursor"] = cursor
         if series_ticker:
@@ -88,7 +123,6 @@ class KalshiClient:
         response = await self.client.get(
             path,
             params=params,
-            headers=self._auth_headers("GET", path),
         )
         response.raise_for_status()
         payload = response.json()
@@ -107,20 +141,19 @@ class KalshiClient:
         path = f"/markets/{ticker}/orderbook"
         response = await self.client.get(
             path,
-            headers=self._auth_headers("GET", path),
         )
         response.raise_for_status()
         payload = response.json()
         orderbook = payload.get("orderbook_fp") or payload.get("orderbook") or {}
         yes_levels = orderbook.get("yes_dollars") or orderbook.get("yes") or []
         no_levels = orderbook.get("no_dollars") or orderbook.get("no") or []
-        yes_bid = max((self._orderbook_price(level) for level in yes_levels), default=0)
-        no_bid = max((self._orderbook_price(level) for level in no_levels), default=0)
+        yes_bid = max((self._orderbook_price(level) for level in yes_levels), default=None)
+        no_bid = max((self._orderbook_price(level) for level in no_levels), default=None)
         return SimpleNamespace(
             yes_bid=yes_bid,
-            yes_ask=1 - no_bid if no_levels else 0,
+            yes_ask=1 - no_bid if no_bid is not None else None,
             no_bid=no_bid,
-            no_ask=1 - yes_bid if yes_levels else 0,
+            no_ask=1 - yes_bid if yes_bid is not None else None,
         )
 
     async def get_market_candlesticks(
@@ -174,7 +207,8 @@ class KalshiClient:
             password=None,
         )
         timestamp = str(int(time.time() * 1000))
-        message = f"{timestamp}{method}{path}".encode("utf-8")
+        signing_path = path if path.startswith("/trade-api/") else f"/trade-api/v2{path}"
+        message = f"{timestamp}{method}{signing_path}".encode("utf-8")
         signature = private_key.sign(
             message,
             padding.PSS(
@@ -191,21 +225,25 @@ class KalshiClient:
 
     @classmethod
     def _market_from_json(cls, market: Dict[str, Any]) -> SimpleNamespace:
-        price = cls._coerce_price(
-            cls._first_present(
-                market,
-                "yes_bid_dollars",
-                "yes_bid",
-                "last_price_dollars",
-                "last_price",
-            )
+        yes_bid = cls._coerce_price(
+            cls._first_present(market, "yes_bid_dollars", "yes_bid")
+        )
+        yes_ask = cls._coerce_price(
+            cls._first_present(market, "yes_ask_dollars", "yes_ask")
+        )
+        last_price = cls._coerce_price(
+            cls._first_present(market, "last_price_dollars", "last_price")
         )
         volume = cls._coerce_volume(cls._first_present(market, "volume_fp", "volume"))
         return SimpleNamespace(
             ticker=market.get("ticker", ""),
             title=market.get("title") or market.get("subtitle") or market.get("ticker", ""),
-            yes_bid=price,
-            last_price=price,
+            event_ticker=market.get("event_ticker", ""),
+            yes_sub_title=market.get("yes_sub_title", ""),
+            expiration_time=market.get("expiration_time", ""),
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            last_price=last_price,
             volume=volume,
             raw=market,
         )

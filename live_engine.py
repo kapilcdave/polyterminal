@@ -22,13 +22,15 @@ class ConnectionStatus:
     connected: bool = False
     last_heartbeat: float = 0.0
     messages_received: int = 0
+    updates_received: int = 0
+    subscriptions: int = 0
     latency_ms: float = 0.0
     message: str = ""
 
 
 class LiveEngine:
     KALSHI_WSS_DEMO = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
-    KALSHI_WSS_PROD = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+    KALSHI_WSS_PROD = "wss://api.elections.kalshi.com/trade-api/ws/v2"
     KALSHI_WS_PATH = "/trade-api/ws/v2"
     POLY_MARKET_WSS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     POLY_USER_WSS = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
@@ -46,6 +48,8 @@ class LiveEngine:
         poly_api_secret: Optional[str] = None,
         poly_api_passphrase: Optional[str] = None,
         require_ws_auth: bool = True,
+        enable_kalshi_ws: Optional[bool] = None,
+        enable_poly_user_ws: Optional[bool] = None,
     ):
         self.store = store
         self.kalshi_env = kalshi_env
@@ -55,6 +59,16 @@ class LiveEngine:
         self.poly_api_secret = poly_api_secret or os.getenv("POLYMARKET_API_SECRET")
         self.poly_api_passphrase = poly_api_passphrase or os.getenv("POLYMARKET_API_PASSPHRASE")
         self.require_ws_auth = require_ws_auth
+        self.enable_kalshi_ws = (
+            self._env_flag("POLYTERMINAL_ENABLE_KALSHI_WS", True)
+            if enable_kalshi_ws is None
+            else enable_kalshi_ws
+        )
+        self.enable_poly_user_ws = (
+            self._env_flag("POLYTERMINAL_ENABLE_POLYMARKET_USER_WS", False)
+            if enable_poly_user_ws is None
+            else enable_poly_user_ws
+        )
         
         self._running = False
         self._tasks: List[asyncio.Task] = []
@@ -70,6 +84,8 @@ class LiveEngine:
         self._poly_condition_ids: List[str] = []
         self._poly_market_by_token: Dict[str, Dict[str, str]] = {}
         self._poly_tasks: List[asyncio.Task] = []
+        self._poly_connections = 0
+        self._kalshi_tickers = set()
         
     def add_status_callback(self, callback: Callable):
         self._status_callbacks.append(callback)
@@ -129,16 +145,30 @@ class LiveEngine:
 
         self._poly_market_by_token = market_by_token
         self._poly_condition_ids = list(dict.fromkeys(condition_ids))
+        self.poly_status.subscriptions = len(market_by_token)
         if self._running and previous_tokens != set(market_by_token):
-            for task in self._poly_tasks:
+            old_tasks = list(self._poly_tasks)
+            for task in old_tasks:
                 task.cancel()
+            self._tasks = [task for task in self._tasks if task not in old_tasks]
             self._start_poly_tasks()
 
+    def configure_kalshi_markets(self, markets: List[Any]) -> None:
+        self._kalshi_tickers = {
+            market.ticker
+            for market in markets
+            if getattr(market, "ticker", None)
+        }
+        self.kalshi_status.subscriptions = len(self._kalshi_tickers)
+
     def _start_poly_tasks(self) -> None:
+        token_ids = list(self._poly_market_by_token)
         self._poly_tasks = [
-            asyncio.create_task(self._poly_stream()),
-            asyncio.create_task(self._poly_user_stream()),
+            asyncio.create_task(self._poly_stream(token_ids[index:index + 100]))
+            for index in range(0, len(token_ids), 100)
         ]
+        if self.enable_poly_user_ws:
+            self._poly_tasks.append(asyncio.create_task(self._poly_user_stream()))
         self._tasks.extend(self._poly_tasks)
                 
     async def start(self):
@@ -146,8 +176,15 @@ class LiveEngine:
             return
 
         self._running = True
-        self._tasks.append(asyncio.create_task(self._kalshi_stream()))
+        if self.enable_kalshi_ws:
+            self._tasks.append(asyncio.create_task(self._kalshi_stream()))
+        else:
+            self.kalshi_status.message = "disabled by configuration"
+            await self._notify_status(self.kalshi_status)
         self._start_poly_tasks()
+        if not self.enable_poly_user_ws:
+            self.poly_user_status.message = "disabled by configuration"
+            await self._notify_status(self.poly_user_status)
         self._tasks.append(asyncio.create_task(self._status_heartbeat()))
         
         logger.info("LiveEngine started")
@@ -186,6 +223,13 @@ class LiveEngine:
 
     def _has_poly_credentials(self) -> bool:
         return bool(self.poly_api_key and self.poly_api_secret and self.poly_api_passphrase)
+
+    @staticmethod
+    def _env_flag(name: str, default: bool) -> bool:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on"}
 
     def _kalshi_auth_headers(self) -> Dict[str, str]:
         if not self._has_kalshi_credentials():
@@ -287,21 +331,29 @@ class LiveEngine:
             ticker = payload.get("ticker") or payload.get("market_ticker")
             if not ticker:
                 return
+            if self._kalshi_tickers and ticker not in self._kalshi_tickers:
+                return
                 
             price = None
+            bid = None
+            ask = None
             volume = None
             
             if msg_type == "ticker":
-                price = self._coerce_price(
+                bid = self._coerce_price(
                     self._first_present(
                         payload,
                         "yes_bid_dollars",
-                        "yes_ask_dollars",
                         "yes_bid",
-                        "yes_ask",
-                        "price",
                     )
                 )
+                ask = self._coerce_price(
+                    self._first_present(payload, "yes_ask_dollars", "yes_ask")
+                )
+                last_price = self._coerce_price(
+                    self._first_present(payload, "price_dollars", "price")
+                )
+                price = self._quote_price(bid, ask, last_price)
                 volume = self._coerce_volume(
                     self._first_present(payload, "volume_fp", "volume")
                 )
@@ -320,23 +372,33 @@ class LiveEngine:
                 price = max(valid_prices) if valid_prices else None
 
             if price is not None or volume is not None:
-                await self.store.update_from_kalshi(ticker, price, volume)
+                await self.store.update_from_kalshi(
+                    ticker,
+                    price,
+                    volume,
+                    live=True,
+                    bid=bid,
+                    ask=ask,
+                )
+                self.kalshi_status.updates_received += 1
             
         elif msg_type == "heartbeat":
             self.kalshi_status.last_heartbeat = time.time()
             
-    async def _poly_stream(self):
+    async def _poly_stream(self, token_ids: List[str]):
         while self._running:
             keepalive = None
+            registered_connection = False
             retry_delay = 1
             try:
                 async with websockets.connect(self.POLY_MARKET_WSS) as ws:
                     keepalive = asyncio.create_task(self._poly_keepalive(ws))
+                    self._poly_connections += 1
+                    registered_connection = True
                     self.poly_status.connected = True
-                    self.poly_status.message = "connected"
+                    self.poly_status.message = f"live: {self.poly_status.subscriptions} markets"
                     self.poly_status.last_heartbeat = time.time()
                     await self._notify_status(self.poly_status)
-                    token_ids = list(self._poly_market_by_token)
                     if not token_ids:
                         self.poly_status.connected = False
                         self.poly_status.message = "no Polymarket token ids available"
@@ -346,10 +408,10 @@ class LiveEngine:
                             
                     sub_msg = {
                         "type": "market",
-                        "assets_ids": token_ids[:100],
+                        "assets_ids": token_ids,
                         "custom_feature_enabled": True,
                     }
-                    logger.debug(f"Subscribing to Poly with {len(token_ids[:100])} tokens.")
+                    logger.debug("Subscribing to Poly with %s tokens.", len(token_ids))
                     await ws.send(json.dumps(sub_msg))
                     
                     async for message in ws:
@@ -388,8 +450,10 @@ class LiveEngine:
                     keepalive.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await keepalive
-                self.poly_status.connected = False
-                if self.poly_status.message == "connected":
+                if registered_connection and self._poly_connections:
+                    self._poly_connections -= 1
+                self.poly_status.connected = self._poly_connections > 0
+                if not self.poly_status.connected and self.poly_status.message.startswith("live:"):
                     self.poly_status.message = "disconnected"
                 await self._notify_status(self.poly_status)
 
@@ -471,38 +535,69 @@ class LiveEngine:
             asset_id = data.get("asset_id") or data.get("token_id")
             if not asset_id:
                 return
+            metadata = self._poly_market_by_token.get(str(asset_id))
+            if not metadata:
+                return
                 
             price = None
+            bid = None
+            ask = None
             volume = None
             
             if msg_type in {"price_change", "last_trade_price"}:
-                price = self._coerce_price(
-                    self._first_present(data, "best_bid", "price")
-                )
+                bid = self._coerce_price(data.get("best_bid"))
+                ask = self._coerce_price(data.get("best_ask"))
+                last_price = self._coerce_price(data.get("price"))
+                price = self._quote_price(bid, ask, last_price)
             elif msg_type in {"orderbook_change", "book"}:
                 bids = data.get("bids", [])
                 prices = [self._coerce_price(level.get("price")) for level in bids]
                 valid_prices = [value for value in prices if value is not None]
-                price = max(valid_prices) if valid_prices else None
+                bid = max(valid_prices) if valid_prices else None
+                asks = data.get("asks", [])
+                ask_prices = [self._coerce_price(level.get("price")) for level in asks]
+                valid_asks = [value for value in ask_prices if value is not None]
+                ask = min(valid_asks) if valid_asks else None
+                price = self._quote_price(bid, ask, None)
             elif msg_type == "best_bid_ask":
-                price = self._coerce_price(data.get("best_bid"))
+                bid = self._coerce_price(data.get("best_bid"))
+                ask = self._coerce_price(data.get("best_ask"))
+                price = self._quote_price(bid, ask, None)
 
-            metadata = self._poly_market_by_token.get(str(asset_id), {})
-            await self.store.update_from_poly(
-                str(asset_id),
-                metadata.get("question", ""),
-                price,
-                volume,
-            )
+            if price is not None:
+                await self.store.update_from_poly(
+                    str(asset_id),
+                    metadata.get("question", ""),
+                    price,
+                    volume,
+                    live=True,
+                    bid=bid,
+                    ask=ask,
+                )
+                self.poly_status.updates_received += 1
+                self.poly_status.last_heartbeat = time.time()
             
         elif msg_type == "pong":
             self.poly_status.last_heartbeat = time.time()
             
     @staticmethod
     def _extract_poly_token_id(market: Dict[str, Any]) -> Optional[str]:
+        outcomes = market.get("outcomes")
+        if isinstance(outcomes, str):
+            try:
+                outcomes = json.loads(outcomes)
+            except json.JSONDecodeError:
+                outcomes = []
+        yes_index = 0
+        if isinstance(outcomes, list):
+            for index, outcome in enumerate(outcomes):
+                if str(outcome).strip().lower() == "yes":
+                    yes_index = index
+                    break
+
         tokens = market.get("tokens")
         if tokens and isinstance(tokens, list):
-            token = tokens[0]
+            token = tokens[min(yes_index, len(tokens) - 1)]
             if isinstance(token, dict):
                 return token.get("token_id") or token.get("id")
 
@@ -514,7 +609,7 @@ class LiveEngine:
                 clob_token_ids = None
 
         if isinstance(clob_token_ids, list) and clob_token_ids:
-            return str(clob_token_ids[0])
+            return str(clob_token_ids[min(yes_index, len(clob_token_ids) - 1)])
 
         return None
 
@@ -542,6 +637,18 @@ class LiveEngine:
             return max(0, int(float(value)))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _quote_price(
+        bid: Optional[float],
+        ask: Optional[float],
+        fallback: Optional[float],
+    ) -> Optional[float]:
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        if fallback is not None:
+            return fallback
+        return bid if bid is not None else ask
 
     @staticmethod
     def _first_present(data: Dict[str, Any], *keys: str) -> Any:

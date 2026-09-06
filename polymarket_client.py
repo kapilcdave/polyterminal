@@ -21,22 +21,39 @@ class PolymarketClient:
         Fetch active markets from Gamma API.
         """
         url = f"{self.GAMMA_URL}/markets"
-        params = {
-            "active": "true",
-            "closed": "false",
-            "limit": limit
-        }
-        if tag:
-            params["tag"] = tag
-            
+        markets = []
+        offset = 0
         try:
-            response = await self.client.get(url, params=params)
-            response.raise_for_status()
-            markets = response.json()
-            return markets
+            while len(markets) < limit:
+                page_size = min(100, limit - len(markets))
+                params = {
+                    "active": "true",
+                    "closed": "false",
+                    "limit": page_size,
+                    "offset": offset,
+                    "order": "volumeNum",
+                    "ascending": "false",
+                }
+                if tag:
+                    params["tag_id"] = tag
+                response = await self.client.get(url, params=params)
+                response.raise_for_status()
+                page = response.json()
+                if not isinstance(page, list) or not page:
+                    break
+                markets.extend(market for market in page if self._has_clob_token(market))
+                offset += len(page)
+                if len(page) < page_size:
+                    break
+            return markets[:limit]
         except Exception as e:
             logger.error(f"Error fetching Polymarket markets: {e}")
             raise
+
+    @staticmethod
+    def _has_clob_token(market) -> bool:
+        token_ids = market.get("clobTokenIds")
+        return bool(token_ids and token_ids != "[]")
 
     async def get_market_book(self, token_id: str):
         """
