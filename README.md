@@ -1,4 +1,4 @@
-# PolyTerminal
+# Polyterminal
 
 [![CI](https://github.com/kapilcdave/polyterminal/actions/workflows/ci.yml/badge.svg)](https://github.com/kapilcdave/polyterminal/actions/workflows/ci.yml)
 
